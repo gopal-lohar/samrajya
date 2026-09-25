@@ -1,0 +1,37 @@
+# Relative paths below resolve against the directory containing this file,
+# not the directory you launch mahamantri from.
+opencode:
+  serverURL: http://localhost:4096
+  # `opencode serve` picks a NEW password every start. Either paste the current
+  # one here (edits are picked up while mahamantri runs), or pin it once with
+  #   OPENCODE_SERVER_PASSWORD=<fixed> opencode serve --port 4096
+  # and never touch this again. Empty falls back to $OPENCODE_SERVER_PASSWORD.
+  password: ""
+linear:
+  signingSecret: ""          # empty falls back to $LINEAR_SIGNING_SECRET
+  listenAddr: "127.0.0.1:45821"
+  # Senapati's own Linear account. Events are worded from its point of view
+  # ("assigned to you", "mentioned you"), and its own actions are logged but
+  # not fed back to it. botHandle is what comments @-mention it as - often the
+  # local part of the account's email, not its display name.
+  botUserID: ""
+  botName: ""                # defaults to "Senapati"
+  botHandle: ""
+attention:
+  listenAddr: "127.0.0.1:4097"
+  registryFile: "./mahamantri-registry.json"
+state:
+  senapatiFile: "./mahamantri-senapati.json"   # holds the current + retired Senapati session IDs
+senapati:
+  agent: ""                  # opencode custom-agent name, optional
+  directory: ""              # optional session working directory
+  # The model Senapati runs on. Leave it unset and sessions made through the
+  # API use the opencode SERVER's default model (often a free one) - not the
+  # one you pick in the opencode TUI, which is stored client-side.
+  model:
+    providerID: ""           # e.g. openai
+    id: ""                   # e.g. gpt-6-sol
+  # Role text sent to Senapati as its first message (with its identity and the
+  # service URLs). Agent-file frontmatter is ignored.
+  instructionsFile: "../senapati/senapati.md"
+  rotationThreshold: 0.4     # fraction of the model's context limit that triggers a new Senapati session
