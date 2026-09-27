@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -18,6 +19,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/gopal-lohar/samrajya/mahamantri/attention"
 	"github.com/gopal-lohar/samrajya/mahamantri/config"
+	"github.com/gopal-lohar/samrajya/mahamantri/control"
 	"github.com/gopal-lohar/samrajya/mahamantri/linear"
 	"github.com/gopal-lohar/samrajya/mahamantri/opencode"
 	"github.com/gopal-lohar/samrajya/mahamantri/senapati"
@@ -100,13 +102,18 @@ func run(configPath string) error {
 		if err != nil {
 			return "", err
 		}
+		var models []senapati.ModelChoice
+		for _, m := range cfg.Models {
+			models = append(models, senapati.ModelChoice{ID: m.ID, Credits: m.Credits, Use: m.Use})
+		}
 		return senapati.Briefing(senapati.BriefingInfo{
-			LinearUserID: cfg.Linear.BotUserID,
-			LinearName:   cfg.Linear.BotName,
-			LinearHandle: cfg.Linear.BotHandle,
-			OpencodeURL:  cfg.Opencode.ServerURL,
-			AttentionURL: httpURL(cfg.Attention.ListenAddr),
-			Instructions: instructions,
+			LinearUserID:  cfg.Linear.BotUserID,
+			LinearName:    cfg.Linear.BotName,
+			LinearHandle:  cfg.Linear.BotHandle,
+			MahamantriURL: httpURL(cfg.Attention.ListenAddr),
+			DefaultModel:  cfg.Sainik.DefaultModel,
+			Models:        models,
+			Instructions:  instructions,
 		}), nil
 	})
 	createReq := opencode.CreateSessionRequest{Agent: cfg.Senapati.Agent}
@@ -158,7 +165,16 @@ func run(configPath string) error {
 		info, err := client.GetSession(ctx, id)
 		return info.Title, err
 	}
-	attnSrv := attention.NewServer(reg, bcast, lookup)
+	// One local API: the attention API, the sainik operations, and the
+	// gateway to the whole opencode API (credentials held here, not by Senapati).
+	mux := http.NewServeMux()
+	attention.Routes(mux, reg, bcast, lookup)
+	control.Routes(mux, client, reg, control.Options{
+		Directory:    cfg.Sainik.Directory,
+		DefaultModel: cfg.Sainik.DefaultModel,
+		Agent:        cfg.Sainik.Agent,
+	})
+	attnSrv := &http.Server{Handler: mux}
 	linearSrv := &http.Server{Handler: linear.NewHandler(cfg.Linear.SigningSecret, linear.Identity{UserID: cfg.Linear.BotUserID, Name: cfg.Linear.BotName, Handle: cfg.Linear.BotHandle}, mgr, logger)}
 	go attnSrv.Serve(attnLn)
 	go linearSrv.Serve(linearLn)
@@ -175,7 +191,7 @@ func run(configPath string) error {
 		client.SetPassword(c.Opencode.Password)
 		running, reloaded := cfg, c
 		running.Opencode.Password, reloaded.Opencode.Password = "", ""
-		if running != reloaded {
+		if !reflect.DeepEqual(running, reloaded) {
 			configNotice.Store(filepath.Base(configPath) + " changed - restart mahamantri to apply everything except the password")
 			return
 		}

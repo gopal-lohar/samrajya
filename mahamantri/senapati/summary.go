@@ -53,6 +53,9 @@ func HandoffSummary(sainiks []attention.Instance, retiredFrom string) string {
 	fmt.Fprintf(&b, " Currently registered sainiks (%d):", len(sainiks))
 	for _, inst := range sainiks {
 		fmt.Fprintf(&b, "\n- %q (session %s): status=%s", label(inst), inst.SessionID, inst.Status)
+		if inst.Phase != "" {
+			fmt.Fprintf(&b, ", phase=%q", inst.Phase)
+		}
 	}
 	return b.String()
 }

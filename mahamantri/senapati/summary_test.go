@@ -35,11 +35,11 @@ func TestSummarizeManualTakeover(t *testing.T) {
 
 func TestHandoffSummaryListsSainiks(t *testing.T) {
 	sainiks := []attention.Instance{
-		{SessionID: "ses_a", Label: "sainik-ENG-1", Status: "running"},
+		{SessionID: "ses_a", Label: "sainik-ENG-1", Status: "running", Phase: "awaiting plan approval"},
 		{SessionID: "ses_b", Status: "blocked"},
 	}
 	got := HandoffSummary(sainiks, "ses_old")
-	if !strings.Contains(got, "ses_old") || !strings.Contains(got, "sainik-ENG-1") || !strings.Contains(got, "ses_b") {
+	if !strings.Contains(got, "ses_old") || !strings.Contains(got, "sainik-ENG-1") || !strings.Contains(got, "ses_b") || !strings.Contains(got, `phase="awaiting plan approval"`) {
 		t.Errorf("HandoffSummary() = %q", got)
 	}
 }

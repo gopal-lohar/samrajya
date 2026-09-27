@@ -106,3 +106,11 @@ func TestSenapatiRowShowsTheModelInUse(t *testing.T) {
 		t.Errorf("an unconfigured model must say so:\n%s", view)
 	}
 }
+
+func TestSainikRowShowsItsPhase(t *testing.T) {
+	m := newModel(fakeMgr{cur: state.SenapatiRecord{SessionID: "ses_s", Title: "Senapati-1"}},
+		attention.Instance{SessionID: "ses_a", Label: "sainik-SEN-30-x", Status: "idle", Phase: "awaiting plan approval"})
+	if view := m.View(); !strings.Contains(view, "[awaiting plan approval]") {
+		t.Errorf("phase not shown:\n%s", view)
+	}
+}

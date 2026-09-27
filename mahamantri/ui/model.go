@@ -22,6 +22,7 @@ type Row struct {
 	Reason    string
 	Since     time.Time
 	Model     string
+	Phase     string
 }
 
 // registry is the subset of *attention.Registry the TUI needs.
@@ -111,7 +112,7 @@ func buildRows(reg registry, mgr manager) []Row {
 		if title == "" {
 			title = inst.SessionID
 		}
-		rows = append(rows, Row{Kind: "sainik", Title: title, SessionID: inst.SessionID, Status: inst.Status, Reason: inst.Reason})
+		rows = append(rows, Row{Kind: "sainik", Title: title, SessionID: inst.SessionID, Status: inst.Status, Reason: inst.Reason, Phase: inst.Phase})
 	}
 	return rows
 }
@@ -188,6 +189,9 @@ func renderRow(row Row) string {
 		text := fmt.Sprintf("%-22s %s  %s", row.Title, row.SessionID, row.Status)
 		if row.Reason != "" {
 			text += " (" + row.Reason + ")"
+		}
+		if row.Phase != "" {
+			text += "  [" + row.Phase + "]"
 		}
 		return styleForStatus(row.Status).Render(text)
 	}

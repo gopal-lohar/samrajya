@@ -83,3 +83,35 @@ func TestRegisterProtectedSessionStillForbidden(t *testing.T) {
 		t.Errorf("status = %d, want 403", rec.Code)
 	}
 }
+
+func TestPatchInstanceSetsPhaseAndLabelAndPersists(t *testing.T) {
+	r := newTestRegistry(t, &fakeParents{parentOf: map[string]string{}})
+	r.Register("ses_a", "orig")
+	srv := NewServer(r, NewBroadcaster(), nil)
+
+	req := httptest.NewRequest(http.MethodPatch, "/instances/ses_a", strings.NewReader(`{"phase":"awaiting plan approval"}`))
+	rec := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body)
+	}
+	if inst, _ := r.Get("ses_a"); inst.Phase != "awaiting plan approval" || inst.Label != "orig" {
+		t.Errorf("instance = %+v, want the phase set and the label untouched", inst)
+	}
+
+	// Survives a restart: a fresh registry over the same file sees it.
+	r2 := NewRegistry(r.path, &fakeParents{parentOf: map[string]string{}})
+	if err := r2.ReloadFromDisk(); err != nil {
+		t.Fatal(err)
+	}
+	if inst, _ := r2.Get("ses_a"); inst.Phase != "awaiting plan approval" {
+		t.Errorf("phase not persisted: %+v", inst)
+	}
+
+	req = httptest.NewRequest(http.MethodPatch, "/instances/ses_missing", strings.NewReader(`{"phase":"x"}`))
+	rec = httptest.NewRecorder()
+	srv.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("unknown instance: status = %d, want 404", rec.Code)
+	}
+}
