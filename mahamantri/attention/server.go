@@ -21,11 +21,40 @@ type SessionLookup func(ctx context.Context, sessionID string) (title string, er
 // makes that omission safe - revisit if this is ever bound non-locally.
 func NewServer(reg *Registry, bcast *Broadcaster, lookup SessionLookup) *http.Server {
 	mux := http.NewServeMux()
+	Routes(mux, reg, bcast, lookup)
+	return &http.Server{Handler: mux}
+}
+
+// Routes registers the attention API on mux, so other handlers (the sainik
+// operations and the opencode gateway) can share the one listener.
+func Routes(mux *http.ServeMux, reg *Registry, bcast *Broadcaster, lookup SessionLookup) {
 	mux.HandleFunc("GET /instances", handleListInstances(reg))
 	mux.HandleFunc("POST /instances", handleRegister(reg, lookup))
+	mux.HandleFunc("PATCH /instances/{id}", handleUpdate(reg))
 	mux.HandleFunc("DELETE /instances/{id}", handleUnregister(reg))
 	mux.HandleFunc("GET /events", handleEvents(reg, bcast))
-	return &http.Server{Handler: mux}
+}
+
+func handleUpdate(reg *Registry) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Label *string `json:"label"`
+			Phase *string `json:"phase"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		inst, err := reg.Update(r.PathValue("id"), body.Label, body.Phase)
+		switch {
+		case errors.Is(err, ErrNotRegistered):
+			writeError(w, http.StatusNotFound, err.Error())
+		case err != nil:
+			writeError(w, http.StatusInternalServerError, err.Error())
+		default:
+			writeJSON(w, http.StatusOK, inst)
+		}
+	}
 }
 
 func handleListInstances(reg *Registry) http.HandlerFunc {
@@ -122,6 +151,10 @@ func handleEvents(reg *Registry, bcast *Broadcaster) http.HandlerFunc {
 		}
 	}
 }
+
+// WriteJSON and WriteError are the API's shared response helpers.
+func WriteJSON(w http.ResponseWriter, status int, v any)       { writeJSON(w, status, v) }
+func WriteError(w http.ResponseWriter, status int, msg string) { writeError(w, status, msg) }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")

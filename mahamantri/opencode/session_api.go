@@ -141,10 +141,25 @@ type rawMessage struct {
 		ProviderID string `json:"providerID"`
 	} `json:"model"`
 	Tokens TokenUsage `json:"tokens"`
+	Cost   float64    `json:"cost"`
+	Text   string     `json:"text"` // user messages carry their text at the top level
 	Time   struct {
 		Created   int64 `json:"created"`
 		Completed int64 `json:"completed"`
 	} `json:"time"`
+	Content []rawContent `json:"content"`
+}
+
+// rawContent is one part of an assistant message: reasoning, text, or a
+// tool call with its live state.
+type rawContent struct {
+	Type  string `json:"type"`
+	Name  string `json:"name"`
+	Text  string `json:"text"`
+	State struct {
+		Status string         `json:"status"`
+		Input  map[string]any `json:"input"`
+	} `json:"state"`
 }
 
 // LatestAssistantMessage returns the most recent *completed*

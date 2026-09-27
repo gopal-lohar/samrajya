@@ -4,16 +4,25 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
-// Config is comparable on purpose: main compares a reloaded config against
-// the running one to tell the user which changes need a restart.
+// ModelPolicy is one model Senapati may choose for a session it spawns. Use
+// and Credits are free-form guidance written for Senapati (what the model is
+// good for, how scarce its credits are) and are rendered into its briefing.
+type ModelPolicy struct {
+	ID      string `yaml:"id"` // provider/id
+	Credits string `yaml:"credits"`
+	Use     string `yaml:"use"`
+}
+
 type Config struct {
 	Opencode struct {
 		ServerURL string `yaml:"serverURL"`
@@ -26,11 +35,19 @@ type Config struct {
 		BotName       string `yaml:"botName"`
 		BotHandle     string `yaml:"botHandle"`
 	} `yaml:"linear"`
+	// Attention is mahamantri's local API: sainik operations, the opencode
+	// gateway (with credentials), and the attention API. Loopback only.
 	Attention struct {
 		ListenAddr   string `yaml:"listenAddr"`
 		RegistryFile string `yaml:"registryFile"`
 	} `yaml:"attention"`
-	State struct {
+	Sainik struct {
+		Directory    string `yaml:"directory"`
+		DefaultModel string `yaml:"defaultModel"` // provider/id, used when Senapati names none
+		Agent        string `yaml:"agent"`
+	} `yaml:"sainik"`
+	Models []ModelPolicy `yaml:"models"`
+	State  struct {
 		SenapatiFile string `yaml:"senapatiFile"`
 	} `yaml:"state"`
 	Senapati struct {
@@ -118,6 +135,9 @@ func (c Config) Validate() error {
 		return fmt.Errorf("linear.listenAddr is required")
 	case c.Attention.ListenAddr == "":
 		return fmt.Errorf("attention.listenAddr is required")
+	case !loopback(c.Attention.ListenAddr):
+		return fmt.Errorf("attention.listenAddr %q must be a loopback address such as 127.0.0.1:4097: "+
+			"it serves the opencode API with mahamantri's credentials, unauthenticated", c.Attention.ListenAddr)
 	case c.Attention.RegistryFile == "":
 		return fmt.Errorf("attention.registryFile is required")
 	case c.State.SenapatiFile == "":
@@ -125,7 +145,34 @@ func (c Config) Validate() error {
 	case c.Senapati.RotationThreshold <= 0 || c.Senapati.RotationThreshold > 1:
 		return fmt.Errorf("senapati.rotationThreshold must be between 0 and 1")
 	}
+	if c.Sainik.DefaultModel != "" && !isModelRef(c.Sainik.DefaultModel) {
+		return fmt.Errorf("sainik.defaultModel %q must look like provider/id", c.Sainik.DefaultModel)
+	}
+	for i, m := range c.Models {
+		if !isModelRef(m.ID) {
+			return fmt.Errorf("models[%d].id %q must look like provider/id", i, m.ID)
+		}
+	}
 	return nil
+}
+
+func isModelRef(s string) bool {
+	provider, id, ok := strings.Cut(s, "/")
+	return ok && provider != "" && id != ""
+}
+
+// loopback reports whether addr binds only the local machine. An empty host
+// (":4097") binds every interface and does not count.
+func loopback(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // Watch polls path every interval and calls onChange whenever the file's

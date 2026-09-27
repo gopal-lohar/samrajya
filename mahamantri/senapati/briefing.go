@@ -13,9 +13,21 @@ type BriefingInfo struct {
 	LinearUserID string
 	LinearName   string
 	LinearHandle string
-	OpencodeURL  string
-	AttentionURL string
-	Instructions string
+	// MahamantriURL is the one address Senapati needs: the sainik operations,
+	// the attention API, and the gateway to the whole opencode API - with
+	// credentials handled, so it never sees or tests a password.
+	MahamantriURL string
+	DefaultModel  string        // provider/id used when a spawn names no model
+	Models        []ModelChoice // what it may pick from, with guidance
+	Instructions  string
+}
+
+// ModelChoice is one model Senapati may pick for a session, with the
+// guidance the person gave for when to use it.
+type ModelChoice struct {
+	ID      string
+	Credits string
+	Use     string
 }
 
 // Briefing is the first message of every Senapati session. Without it
@@ -40,12 +52,28 @@ func Briefing(i BriefingInfo) string {
 		b.WriteString("Issues assigned to you are your work; act on them without waiting to be asked twice.\n\n")
 	}
 
-	b.WriteString("Where things are:\n")
-	if i.OpencodeURL != "" {
-		fmt.Fprintf(&b, "- opencode server: %s (HTTP basic auth: user \"opencode\", password in $OPENCODE_SERVER_PASSWORD when the server was started with it)\n", i.OpencodeURL)
+	if i.MahamantriURL != "" {
+		fmt.Fprintf(&b, "Everything you need is at Mahamantri: %s . It runs sainik sessions for you and exposes the whole "+
+			"opencode API at %s/opencode/... (for example %s/opencode/openapi.json) with the credentials already handled - "+
+			"you never need, test or ask for an opencode password.\n\n", i.MahamantriURL, i.MahamantriURL, i.MahamantriURL)
 	}
-	if i.AttentionURL != "" {
-		fmt.Fprintf(&b, "- Mahamantri attention API: %s (register the sainik sessions you want watched)\n", i.AttentionURL)
+
+	if len(i.Models) > 0 || i.DefaultModel != "" {
+		b.WriteString("Models - you choose one for every session you start (\"model\":\"provider/id\"):\n")
+		if i.DefaultModel != "" {
+			fmt.Fprintf(&b, "- Default when you name none: %s\n", i.DefaultModel)
+		}
+		for _, m := range i.Models {
+			fmt.Fprintf(&b, "- %s", m.ID)
+			if m.Credits != "" {
+				fmt.Fprintf(&b, " [credits: %s]", m.Credits)
+			}
+			if m.Use != "" {
+				fmt.Fprintf(&b, " - %s", m.Use)
+			}
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
 	}
 
 	if strings.TrimSpace(i.Instructions) != "" {

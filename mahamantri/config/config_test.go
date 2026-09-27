@@ -141,3 +141,50 @@ func TestWatchReportsChangesAndBrokenEdits(t *testing.T) {
 		t.Fatal("Watch did not report the broken file")
 	}
 }
+
+func TestAttentionListenAddrMustBeLoopback(t *testing.T) {
+	for _, addr := range []string{":4097", "0.0.0.0:4097", "192.168.1.5:4097", "example.com:4097"} {
+		y := strings.Replace(validYAML, `"127.0.0.1:4097"`, `"`+addr+`"`, 1)
+		if _, err := Load(writeConfig(t, y)); err == nil {
+			t.Errorf("%s should be rejected: the gateway exposes opencode's credentials", addr)
+		}
+	}
+	for _, addr := range []string{"127.0.0.1:4097", "localhost:4097", "[::1]:4097"} {
+		y := strings.Replace(validYAML, `"127.0.0.1:4097"`, `"`+addr+`"`, 1)
+		if _, err := Load(writeConfig(t, y)); err != nil {
+			t.Errorf("%s should be accepted: %v", addr, err)
+		}
+	}
+}
+
+func TestModelPolicyAndSainikDefaultsLoad(t *testing.T) {
+	y := validYAML + `
+sainik:
+  directory: /repos
+  defaultModel: opencode-go/deepseek-v4.1-flash
+models:
+  - id: opencode-go/deepseek-v4.1-flash
+    credits: plentiful
+    use: routine work
+  - id: openai/gpt-6-sol
+    credits: scarce
+`
+	c, err := Load(writeConfig(t, y))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Sainik.DefaultModel != "opencode-go/deepseek-v4.1-flash" || len(c.Models) != 2 || c.Models[1].Credits != "scarce" {
+		t.Errorf("Load() = %+v", c)
+	}
+}
+
+func TestMalformedModelReferencesAreRejected(t *testing.T) {
+	for _, y := range []string{
+		validYAML + "sainik:\n  defaultModel: gpt-6-sol\n",
+		validYAML + "models:\n  - id: gpt-6-sol\n",
+	} {
+		if _, err := Load(writeConfig(t, y)); err == nil {
+			t.Errorf("a model without a provider should be rejected:\n%s", y)
+		}
+	}
+}

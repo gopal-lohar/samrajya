@@ -13,13 +13,20 @@ import (
 func TestBriefingTellsSenapatiWhoItIsAndThatTheHandleIsItself(t *testing.T) {
 	got := Briefing(BriefingInfo{
 		LinearUserID: "bot-id", LinearName: "Senapati", LinearHandle: "senapati-bot",
-		OpencodeURL: "http://localhost:4096", AttentionURL: "http://127.0.0.1:4097",
+		MahamantriURL: "http://127.0.0.1:4097",
+		DefaultModel:  "opencode-go/deepseek-v4.1-flash",
+		Models: []ModelChoice{
+			{ID: "opencode-go/deepseek-v4.1-flash", Credits: "plentiful", Use: "routine work"},
+			{ID: "openai/gpt-6-sol", Credits: "scarce", Use: "hard reasoning"},
+		},
 		Instructions: "WORKFLOW TEXT",
 	})
 	for _, want := range []string{
 		"You are Senapati", `the user "Senapati"`, "bot-id",
 		"@senapati-bot - that is you, not another person",
-		"http://localhost:4096", "http://127.0.0.1:4097", "WORKFLOW TEXT",
+		"http://127.0.0.1:4097", "http://127.0.0.1:4097/opencode/openapi.json", "you never need, test or ask for an opencode password",
+		"Default when you name none: opencode-go/deepseek-v4.1-flash",
+		"openai/gpt-6-sol [credits: scarce] - hard reasoning", "WORKFLOW TEXT",
 		"without waiting to be asked twice",
 	} {
 		if !strings.Contains(got, want) {
@@ -28,12 +35,19 @@ func TestBriefingTellsSenapatiWhoItIsAndThatTheHandleIsItself(t *testing.T) {
 	}
 }
 
-func TestBriefingNeverContainsAPassword(t *testing.T) {
-	got := Briefing(BriefingInfo{OpencodeURL: "http://localhost:4096"})
-	if !strings.Contains(got, "$OPENCODE_SERVER_PASSWORD") {
-		t.Error("should point at the env var")
+// Senapati used to be told to authenticate to opencode itself and then
+// stalled with "credentials unavailable". It must not be asked to.
+func TestBriefingNeverAsksSenapatiToHandleOpencodeCredentials(t *testing.T) {
+	got := Briefing(BriefingInfo{MahamantriURL: "http://127.0.0.1:4097"})
+	if strings.Contains(got, "OPENCODE_SERVER_PASSWORD") || strings.Contains(got, "basic auth") {
+		t.Errorf("briefing mentions opencode credentials:\n%s", got)
 	}
-	// There is no password field to leak: the type has no way to carry one.
+}
+
+func TestBriefingOmitsTheModelSectionWhenNoneConfigured(t *testing.T) {
+	if got := Briefing(BriefingInfo{MahamantriURL: "http://x"}); strings.Contains(got, "Models -") {
+		t.Errorf("no models configured, none should be listed:\n%s", got)
+	}
 }
 
 func TestBriefingOmitsIdentityWhenUnknown(t *testing.T) {

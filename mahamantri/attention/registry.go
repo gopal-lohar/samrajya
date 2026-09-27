@@ -33,6 +33,11 @@ type Instance struct {
 	SessionID    string    `json:"sessionID"`
 	Label        string    `json:"label,omitempty"`
 	RegisteredAt time.Time `json:"registeredAt"`
+	// Phase is a free-form note the manager keeps on the session ("planning",
+	// "awaiting plan approval", "executing"...). Persisted, shown in the TUI
+	// and in the handoff to a rotated Senapati, so state that would otherwise
+	// live only in its context survives.
+	Phase string `json:"phase,omitempty"`
 
 	Status      string          `json:"status"` // "running" | "idle" | "blocked" | "manual"
 	Reason      string          `json:"reason,omitempty"`
@@ -88,6 +93,26 @@ func (r *Registry) Register(sessionID, label string) (Instance, error) {
 	r.instances[sessionID] = inst
 	if err := r.saveLocked(); err != nil {
 		delete(r.instances, sessionID)
+		return Instance{}, err
+	}
+	return *inst, nil
+}
+
+// Update changes an instance's label and/or phase; nil leaves a field alone.
+func (r *Registry) Update(sessionID string, label, phase *string) (Instance, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	inst, ok := r.instances[sessionID]
+	if !ok {
+		return Instance{}, ErrNotRegistered
+	}
+	if label != nil {
+		inst.Label = *label
+	}
+	if phase != nil {
+		inst.Phase = *phase
+	}
+	if err := r.saveLocked(); err != nil {
 		return Instance{}, err
 	}
 	return *inst, nil
@@ -205,8 +230,8 @@ func (r *Registry) Observe(ev opencode.Event) {
 // MarkManual overrides an instance's status to "manual" - called from the
 // attention-forwarding loop once DetectManualTakeover confirms a human, not
 // mahamantri or Senapati's own tooling, produced the latest activity on it.
-// Kept separate from Observe (which stays fast and I/O-free) since the
-// detection itself requires a network round-trip.
+// Kept separate from Observe so the override lands after that event's
+// baseline status update, in a fixed order.
 func (r *Registry) MarkManual(sessionID, reason string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -254,12 +279,13 @@ func (r *Registry) ReloadFromDisk() error {
 	}
 	for id, inst := range onDisk {
 		if existing, ok := r.instances[id]; ok {
-			existing.Label = inst.Label
+			existing.Label, existing.Phase = inst.Label, inst.Phase
 			continue
 		}
 		r.instances[id] = &Instance{
 			SessionID:    inst.SessionID,
 			Label:        inst.Label,
+			Phase:        inst.Phase,
 			RegisteredAt: inst.RegisteredAt,
 			Status:       "running",
 		}
@@ -291,6 +317,7 @@ func (r *Registry) saveLocked() error {
 		f.Instances = append(f.Instances, Instance{
 			SessionID:    inst.SessionID,
 			Label:        inst.Label,
+			Phase:        inst.Phase,
 			RegisteredAt: inst.RegisteredAt,
 		})
 	}
