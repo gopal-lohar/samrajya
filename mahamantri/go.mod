@@ -1,6 +1,6 @@
 module github.com/gopal-lohar/samrajya/mahamantri
 
-go 1.27.1
+go 1.27
 
 require (
 	github.com/charmbracelet/bubbletea v1.3.10
