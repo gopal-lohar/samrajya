@@ -29,6 +29,9 @@ type fakeSender struct {
 	switchedModel []opencode.SessionModel
 	switchedAgent []string
 	switchErr     error
+	permissions   map[string][]opencode.PermissionRule
+	instructions  map[string]string // sessionID -> durable role text
+	instructErr   error             // e.g. an older server without instruction entries
 }
 
 func (f *fakeSender) CreateSession(ctx context.Context, req opencode.CreateSessionRequest) (opencode.SessionInfo, error) {
@@ -80,6 +83,32 @@ func (f *fakeSender) SwitchAgent(ctx context.Context, sessionID, agent string) e
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.switchedAgent = append(f.switchedAgent, agent)
+	return nil
+}
+
+func (f *fakeSender) SetPermissions(ctx context.Context, sessionID string, rules []opencode.PermissionRule) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.permissions == nil {
+		f.permissions = map[string][]opencode.PermissionRule{}
+	}
+	f.permissions[sessionID] = rules
+	return nil
+}
+
+func (f *fakeSender) PutInstruction(ctx context.Context, sessionID, key, value string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.instructErr != nil {
+		return f.instructErr
+	}
+	if key != InstructionKey {
+		return errors.New("unexpected instruction key " + key)
+	}
+	if f.instructions == nil {
+		f.instructions = map[string]string{}
+	}
+	f.instructions[sessionID] = value
 	return nil
 }
 
@@ -355,15 +384,21 @@ func withBriefing(m *Manager) *Manager {
 }
 
 // The user's Senapati never got a role at all - it was a stock agent that
-// just said "Noted". Every new session must be briefed before anything else.
+// just said "Noted". Every new session must be briefed before anything else:
+// the role as a durable instruction (a first message is lost when opencode
+// compacts the context, and with it Senapati's idea that it is a manager),
+// then a short activation message.
 func TestNewSessionIsBriefedBeforeAnythingElse(t *testing.T) {
 	f := &fakeSender{}
 	m := withBriefing(newTestManager(t, f))
 	if _, err := m.Start(context.Background(), opencode.CreateSessionRequest{}); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.prompts) != 1 || f.prompts[0].Text != "BRIEFING" || f.prompts[0].Metadata["source"] != "mahamantri" {
-		t.Fatalf("prompts = %+v, want exactly the briefing first", f.prompts)
+	if f.instructions[m.SessionID()] != "BRIEFING" {
+		t.Fatalf("durable instruction = %q, want the briefing", f.instructions[m.SessionID()])
+	}
+	if len(f.prompts) != 1 || f.prompts[0].Text != activation || f.prompts[0].Metadata["source"] != "mahamantri" {
+		t.Fatalf("prompts = %+v, want exactly the activation first", f.prompts)
 	}
 	if m.Current().BriefedAt == nil {
 		t.Error("BriefedAt not recorded")
@@ -391,9 +426,61 @@ func TestResumedSessionIsBriefedOnlyIfItNeverWas(t *testing.T) {
 	}
 
 	third := withBriefing(New(f, first.statePath, 0.4, nil))
+	third.SetBriefing(func() (string, error) { return "EDITED BRIEFING", nil })
 	third.Start(context.Background(), opencode.CreateSessionRequest{})
 	if len(f.prompts) != 1 {
-		t.Errorf("an already-briefed session must not be briefed again: %d prompts", len(f.prompts))
+		t.Errorf("an already-briefed session must not be messaged again: %d prompts", len(f.prompts))
+	}
+	if f.instructions[third.SessionID()] != "EDITED BRIEFING" {
+		t.Errorf("a resumed session's role must be refreshed from the current instructions, got %q", f.instructions[third.SessionID()])
+	}
+}
+
+// Older servers have no instruction entries: the briefing goes back to being
+// the first message, as before.
+func TestBriefingFallsBackToAMessageWithoutInstructionEntries(t *testing.T) {
+	f := &fakeSender{instructErr: opencode.ErrSessionNotFound}
+	m := withBriefing(newTestManager(t, f))
+	if _, err := m.Start(context.Background(), opencode.CreateSessionRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.prompts) != 1 || !strings.HasPrefix(f.prompts[0].Text, "BRIEFING") || !strings.Contains(f.prompts[0].Text, "one short line") {
+		t.Fatalf("prompts = %+v, want the whole briefing as the first message", f.prompts)
+	}
+}
+
+// The guardrail that keeps Senapati from doing sainik work must also reach a
+// session created before it existed - like the one the user already has.
+func TestPermissionsOnCreateAndOnResume(t *testing.T) {
+	f := &fakeSender{}
+	rules := Permissions("http://127.0.0.1:4097", nil)
+	m := newTestManager(t, f)
+	m.Start(context.Background(), opencode.CreateSessionRequest{Permissions: rules})
+	if len(f.created[0].Permissions) != len(rules) {
+		t.Errorf("created with %d rules, want %d", len(f.created[0].Permissions), len(rules))
+	}
+	if len(f.permissions) != 0 {
+		t.Error("a new session gets its rules at creation, not via a separate call")
+	}
+
+	m2 := New(f, m.statePath, 0.4, nil)
+	if _, err := m2.Start(context.Background(), opencode.CreateSessionRequest{Permissions: rules}); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.permissions[m2.SessionID()]) != len(rules) {
+		t.Errorf("resumed session permissions = %+v", f.permissions[m2.SessionID()])
+	}
+}
+
+func TestRotatedSessionKeepsThePermissions(t *testing.T) {
+	f := &fakeSender{}
+	rules := Permissions("http://127.0.0.1:4097", nil)
+	m := newTestManager(t, f)
+	m.Start(context.Background(), opencode.CreateSessionRequest{Permissions: rules})
+	highUsage(f)
+	m.deliver(context.Background(), "trigger")
+	if len(f.created) != 2 || len(f.created[1].Permissions) != len(rules) {
+		t.Errorf("rotated session created without the permissions: %+v", f.created)
 	}
 }
 
@@ -467,8 +554,11 @@ func TestRotationBriefsTheNewSessionInTheHandoffMessage(t *testing.T) {
 
 	m.deliver(context.Background(), "trigger")
 
-	if len(f.prompts) != 2 || !strings.HasPrefix(f.prompts[0].Text, "BRIEFING") || !strings.Contains(f.prompts[0].Text, "fresh Senapati session") {
-		t.Fatalf("prompts = %+v, want briefing+handoff first, then the message", f.prompts)
+	if len(f.prompts) != 2 || !strings.HasPrefix(f.prompts[0].Text, activation) || !strings.Contains(f.prompts[0].Text, "fresh Senapati session") {
+		t.Fatalf("prompts = %+v, want activation+handoff first, then the message", f.prompts)
+	}
+	if f.instructions[m.SessionID()] != "BRIEFING" {
+		t.Error("the rotated-to session needs its role as a durable instruction too")
 	}
 	if m.Current().BriefedAt == nil {
 		t.Error("the rotated-to session should be marked briefed")

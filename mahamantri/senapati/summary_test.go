@@ -50,3 +50,28 @@ func TestHandoffSummaryNoSainiks(t *testing.T) {
 		t.Errorf("HandoffSummary() = %q, want a no-sainiks note", got)
 	}
 }
+
+func TestCompletionNoticeSaysQueuedWorkIsDoneAndWhatIsNext(t *testing.T) {
+	inst := attention.Instance{SessionID: "ses_a", Label: "sainik-ENG-31-x", Phase: "executing"}
+	got := SummarizeEvent(opencode.Event{Type: "session.execution.succeeded"}, inst)
+	for _, want := range []string{"[Sainik notice]", `phase "executing"`, "anything you queued for it has been handled", "status"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in %q", want, got)
+		}
+	}
+}
+
+type issueReg map[string][]attention.Instance
+
+func (r issueReg) ForIssue(issue string) []attention.Instance { return r[issue] }
+
+func TestIssueSainiksDescribesStateForAPing(t *testing.T) {
+	describe := IssueSainiks(issueReg{"ENG-31": {{SessionID: "ses_a", Label: "sainik-ENG-31-fix", Status: "running", Phase: "executing"}}})
+	got := describe("ENG-31")
+	if !strings.Contains(got, `"sainik-ENG-31-fix" (session ses_a): running`) || !strings.Contains(got, `phase "executing"`) {
+		t.Errorf("IssueSainiks = %q", got)
+	}
+	if describe("ENG-99") != "" {
+		t.Error("an issue without a sainik should describe as empty")
+	}
+}

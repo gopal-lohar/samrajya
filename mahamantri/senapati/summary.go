@@ -16,20 +16,25 @@ func label(inst attention.Instance) string {
 }
 
 // SummarizeEvent formats an attention-required event on a registered sainik
-// for Senapati. Each says what to do about it - Senapati is the worker
-// coordinating these sessions, and a bare status line reads as something to
-// acknowledge rather than act on.
+// for Senapati. Each one says what it means and what is expected - including
+// that nothing is to be waited on: the next notice comes by itself.
 func SummarizeEvent(ev opencode.Event, inst attention.Instance) string {
-	who := fmt.Sprintf("Sainik %q (session %s)", label(inst), inst.SessionID)
+	who := fmt.Sprintf("[Sainik notice] %q (session %s)", label(inst), inst.SessionID)
+	if inst.Phase != "" {
+		who += fmt.Sprintf(", phase %q,", inst.Phase)
+	}
 	switch {
 	case ev.Type == "session.execution.succeeded" || ev.Type == "session.idle":
-		return who + " finished its turn. Review what it produced, report progress on Linear, and either give it more work or unregister it."
+		return who + " finished - it is idle now, and anything you queued for it has been handled too. " +
+			"Read its status (lastText) for what it produced; ask it for a short report only if that is not enough. " +
+			"Then do the next step of the issue's workflow: post the result on Linear, give it its next task, or close it out."
 	case ev.Type == "session.execution.failed":
-		return who + " failed. Find out why and decide whether to retry it or take another approach."
+		return who + " failed. Read its status to see why, then retry it with a sharper instruction, " +
+			"switch model if it ran out of credits, or report the problem on Linear."
 	case ev.Type == "session.execution.interrupted":
-		return who + " was interrupted."
+		return who + " was interrupted and is idle. If you interrupted it, the message you sent with the interrupt is what it works on next; nothing else to do."
 	case ev.Severity == opencode.Blocking:
-		return fmt.Sprintf("%s is blocked: %s. Unblock it or decide how to proceed.", who, ev.Summary)
+		return fmt.Sprintf("%s is blocked: %s. Decide it if it is within the issue's scope; otherwise ask on Linear.", who, ev.Summary)
 	}
 	return fmt.Sprintf("%s needs attention: %s", who, ev.Summary)
 }
@@ -38,7 +43,41 @@ func SummarizeEvent(ev opencode.Event, inst attention.Instance) string {
 // notice sent to Senapati, saying what the person did (the action phrase
 // from attention.DetectManualTakeover).
 func SummarizeManualTakeover(inst attention.Instance, action string) string {
-	return fmt.Sprintf("Sainik %q (session %s) was manually taken over: a person %s. It is no longer purely autonomous.", label(inst), inst.SessionID, action)
+	return fmt.Sprintf("[Sainik notice] %q (session %s) was manually taken over: a person %s. "+
+		"Leave it alone until they are done - do not message or interrupt it - and note it on the issue if it matters.",
+		label(inst), inst.SessionID, action)
+}
+
+// IssueSainiks describes, for a Linear ping about issue, the sainiks working
+// on it as mahamantri last saw them - one line each, "" for none.
+func IssueSainiks(reg interface {
+	ForIssue(issue string) []attention.Instance
+}) func(issue string) string {
+	return func(issue string) string {
+		var lines []string
+		for _, inst := range reg.ForIssue(issue) {
+			line := fmt.Sprintf("- %q (session %s): %s", label(inst), inst.SessionID, describeStatus(inst.Status))
+			if inst.Phase != "" {
+				line += fmt.Sprintf(", phase %q", inst.Phase)
+			}
+			lines = append(lines, line)
+		}
+		return strings.Join(lines, "\n")
+	}
+}
+
+func describeStatus(status string) string {
+	switch status {
+	case "running":
+		return "running (busy with a turn)"
+	case "idle":
+		return "idle (waiting for its next instruction)"
+	case "blocked":
+		return "blocked (needs a decision)"
+	case "manual":
+		return "being used by a person directly - leave it alone"
+	}
+	return status
 }
 
 // HandoffSummary is the first message sent into a freshly-rotated Senapati

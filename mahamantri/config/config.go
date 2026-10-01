@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gopal-lohar/samrajya/mahamantri/opencode"
 	"gopkg.in/yaml.v3"
 )
 
@@ -49,6 +50,10 @@ type Config struct {
 	Models []ModelPolicy `yaml:"models"`
 	State  struct {
 		SenapatiFile string `yaml:"senapatiFile"`
+		// LinearThreadsFile remembers the Linear comment threads Senapati
+		// has written in, so replies in them reach it. Defaults to
+		// mahamantri-linear-threads.json next to the config.
+		LinearThreadsFile string `yaml:"linearThreadsFile"`
 	} `yaml:"state"`
 	Senapati struct {
 		Agent     string `yaml:"agent"`
@@ -59,6 +64,10 @@ type Config struct {
 		} `yaml:"model"`
 		RotationThreshold float64 `yaml:"rotationThreshold"`
 		InstructionsFile  string  `yaml:"instructionsFile"`
+		// ExtraPermissions are appended to the rules that restrict Senapati
+		// to Mahamantri and Linear (see senapati.Permissions) - e.g. another
+		// MCP server it should be able to use.
+		ExtraPermissions []opencode.PermissionRule `yaml:"extraPermissions"`
 	} `yaml:"senapati"`
 
 	// Dir is the directory holding the config file; relative paths in it,
@@ -93,6 +102,9 @@ func Load(path string) (Config, error) {
 	if c.Linear.BotUserID != "" && c.Linear.BotName == "" {
 		c.Linear.BotName = "Senapati"
 	}
+	if c.State.LinearThreadsFile == "" {
+		c.State.LinearThreadsFile = "mahamantri-linear-threads.json"
+	}
 	c.resolvePaths()
 	if err := c.Validate(); err != nil {
 		return Config{}, fmt.Errorf("config %s: %w", abs, err)
@@ -113,7 +125,7 @@ func (c *Config) applyEnvFallbacks() {
 }
 
 func (c *Config) resolvePaths() {
-	for _, p := range []*string{&c.Attention.RegistryFile, &c.State.SenapatiFile, &c.Senapati.InstructionsFile} {
+	for _, p := range []*string{&c.Attention.RegistryFile, &c.State.SenapatiFile, &c.State.LinearThreadsFile, &c.Senapati.InstructionsFile} {
 		if *p != "" && !filepath.IsAbs(*p) {
 			*p = filepath.Join(c.Dir, *p)
 		}
@@ -133,6 +145,13 @@ func (c Config) Validate() error {
 		return fmt.Errorf("linear.signingSecret is required (or set LINEAR_SIGNING_SECRET)")
 	case c.Linear.ListenAddr == "":
 		return fmt.Errorf("linear.listenAddr is required")
+	case c.Linear.BotUserID == "":
+		return fmt.Errorf("linear.botUserID is required: Senapati's own Linear user id. Without it its own comments " +
+			"come back to it as pings and replies to it can't be recognised. It is actor.id on any comment Senapati " +
+			"made, in mahamantri.log")
+	case c.Linear.BotHandle == "":
+		return fmt.Errorf("linear.botHandle is required: what comments @-mention Senapati as (the part after the @), " +
+			"or no mention would ever reach it")
 	case c.Attention.ListenAddr == "":
 		return fmt.Errorf("attention.listenAddr is required")
 	case !loopback(c.Attention.ListenAddr):
@@ -151,6 +170,12 @@ func (c Config) Validate() error {
 	for i, m := range c.Models {
 		if !isModelRef(m.ID) {
 			return fmt.Errorf("models[%d].id %q must look like provider/id", i, m.ID)
+		}
+	}
+	for i, r := range c.Senapati.ExtraPermissions {
+		if r.Action == "" || r.Resource == "" || (r.Effect != "allow" && r.Effect != "deny") {
+			return fmt.Errorf("senapati.extraPermissions[%d] needs action, resource and effect (allow or deny) - "+
+				"\"ask\" would block Senapati, there is nobody to answer it", i)
 		}
 	}
 	return nil

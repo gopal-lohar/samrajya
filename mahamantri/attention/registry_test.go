@@ -197,3 +197,27 @@ func TestRegistryReloadFromDiskAddsAndRemovesWithoutResettingStatus(t *testing.T
 		t.Error("ses_b should have been removed by reload")
 	}
 }
+
+func TestInstanceIssueAndForIssue(t *testing.T) {
+	reg := newTestRegistry(t, &fakeParents{})
+	reg.Register("ses_a", "sainik-ENG-31-fix-login")
+	reg.Register("ses_b", "sainik-eng-32")
+	reg.Register("ses_c", "something else")
+	for label, want := range map[string]string{
+		"sainik-ENG-31-fix-login": "ENG-31",
+		"sainik-eng-32":              "ENG-32",
+		"sainik-ENG-310-x":           "ENG-310",
+		"something else":             "",
+		"sainik-task":                "",
+	} {
+		if got := (Instance{Label: label}).Issue(); got != want {
+			t.Errorf("Issue(%q) = %q, want %q", label, got, want)
+		}
+	}
+	if got := reg.ForIssue("eng-31"); len(got) != 1 || got[0].SessionID != "ses_a" {
+		t.Errorf("ForIssue(eng-31) = %+v", got)
+	}
+	if got := reg.ForIssue("ENG-3"); len(got) != 0 {
+		t.Errorf("ForIssue(ENG-3) must not match ENG-31: %+v", got)
+	}
+}

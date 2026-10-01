@@ -28,11 +28,25 @@ type SessionLocation struct {
 	Directory string `json:"directory,omitempty"`
 }
 
+// PermissionRule is one entry of a session's permission ruleset. Rules are
+// evaluated in order and the last one matching wins (verified live against
+// v2.0.18: {"*","*","deny"} followed by {"shell","sleep *","allow"} let
+// `sleep 15` run and rejected `ls /`). Action is the tool's permission name
+// (shell, read, edit, glob, grep, subagent, webfetch, websearch, skill,
+// question, external_directory, or <mcp-server>_<tool>); Resource is what
+// it acts on - for shell, the command text, matched per command.
+type PermissionRule struct {
+	Action   string `json:"action" yaml:"action"`
+	Resource string `json:"resource" yaml:"resource"`
+	Effect   string `json:"effect" yaml:"effect"` // "allow" | "deny" | "ask"
+}
+
 type CreateSessionRequest struct {
-	Title    string           `json:"title,omitempty"`
-	Agent    string           `json:"agent,omitempty"`
-	Model    *SessionModel    `json:"model,omitempty"`
-	Location *SessionLocation `json:"location,omitempty"`
+	Title       string           `json:"title,omitempty"`
+	Agent       string           `json:"agent,omitempty"`
+	Model       *SessionModel    `json:"model,omitempty"`
+	Location    *SessionLocation `json:"location,omitempty"`
+	Permissions []PermissionRule `json:"permissions,omitempty"`
 }
 
 type SessionInfo struct {
@@ -122,6 +136,21 @@ func (c *Client) SwitchModel(ctx context.Context, sessionID string, model Sessio
 // SwitchAgent changes the agent used for the session's subsequent turns.
 func (c *Client) SwitchAgent(ctx context.Context, sessionID, agent string) error {
 	return c.doJSON(ctx, http.MethodPost, "/api/session/"+sessionID+"/agent", map[string]string{"agent": agent}, nil)
+}
+
+// SetPermissions replaces the session's own permission ruleset, which is
+// applied on top of its agent's - how an already-existing session is locked
+// down the same way a newly created one is.
+func (c *Client) SetPermissions(ctx context.Context, sessionID string, rules []PermissionRule) error {
+	return c.doJSON(ctx, http.MethodPatch, "/api/session/"+sessionID, map[string][]PermissionRule{"permissions": rules}, nil)
+}
+
+// PutInstruction attaches (or replaces) a durable instruction entry on the
+// session. Unlike a message, it is part of the session's instructions on
+// every step, so it survives context compaction. The endpoint is marked
+// experimental in v2.0.18.
+func (c *Client) PutInstruction(ctx context.Context, sessionID, key, value string) error {
+	return c.doJSON(ctx, http.MethodPut, "/api/experimental/session/"+sessionID+"/instructions/entries/"+key, map[string]string{"value": value}, nil)
 }
 
 func (c *Client) ListModels(ctx context.Context) ([]ModelInfo, error) {

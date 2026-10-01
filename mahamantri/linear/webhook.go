@@ -19,54 +19,63 @@ type Forwarder interface {
 	Forward(text string) error
 }
 
-// NewHandler verifies Linear-Signature/Linear-Timestamp, logs the full
-// pretty-printed payload plus Linear-Event/Linear-Delivery headers
-// unabridged, and forwards a short natural-language Summarize() to Senapati.
-//
-// self is the Linear user Senapati acts as. Deliveries whose actor is that
-// user are logged but not forwarded - otherwise everything Senapati does on
-// Linear (comments, status changes) comes straight back to it as a new
-// prompt - and every summary is worded from its point of view.
-func NewHandler(secret string, self Identity, fwd Forwarder, logger *log.Logger) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodySize))
-		if err != nil {
-			http.Error(w, "body too large or unreadable", http.StatusBadRequest)
-			return
-		}
-
-		if !ValidSignature(secret, body, r.Header.Get("Linear-Signature")) {
-			http.Error(w, "invalid signature", http.StatusUnauthorized)
-			return
-		}
-		if !FreshTimestamp(r.Header.Get("Linear-Timestamp")) {
-			http.Error(w, "stale timestamp", http.StatusBadRequest)
-			return
-		}
-
-		eventType := r.Header.Get("Linear-Event")
-		logDelivery(logger, eventType, r.Header.Get("Linear-Delivery"), body)
-
-		if self.known() && actorID(body) == self.UserID {
-			logger.Printf("linear: not forwarding - the actor is Senapati's own Linear user (%s)", self.UserID)
-		} else if err := fwd.Forward(Summarize(eventType, body, self)); err != nil {
-			logger.Printf("linear: failed to forward event to senapati: %v", err)
-		}
-		w.WriteHeader(http.StatusOK)
-	}
+// Handler receives Linear's webhooks. Every delivery is verified and logged
+// in full; only pings (see Classify) are forwarded to Senapati, with what
+// mahamantri knows about the issue's sainik attached.
+type Handler struct {
+	Secret  string
+	Self    Identity
+	Threads *Threads
+	// Sainiks describes the sainik session(s) working on a Linear issue
+	// identifier, or "" for none. Optional.
+	Sainiks func(issue string) string
+	Forward Forwarder
+	Logger  *log.Logger
 }
 
-func actorID(body []byte) string {
-	var env envelope
-	if json.Unmarshal(body, &env) != nil {
-		return ""
+func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
-	return env.Actor.ID
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodySize))
+	if err != nil {
+		http.Error(w, "body too large or unreadable", http.StatusBadRequest)
+		return
+	}
+	if !ValidSignature(h.Secret, body, r.Header.Get("Linear-Signature")) {
+		http.Error(w, "invalid signature", http.StatusUnauthorized)
+		return
+	}
+	if !FreshTimestamp(r.Header.Get("Linear-Timestamp")) {
+		http.Error(w, "stale timestamp", http.StatusBadRequest)
+		return
+	}
+
+	eventType := r.Header.Get("Linear-Event")
+	logDelivery(h.Logger, eventType, r.Header.Get("Linear-Delivery"), body)
+	h.handle(eventType, body)
+	w.WriteHeader(http.StatusOK)
+}
+
+func (h *Handler) handle(eventType string, body []byte) {
+	if thread, issue, ok := ownComment(body, h.Self); ok && h.Threads != nil {
+		if err := h.Threads.Add(thread, issue); err != nil {
+			h.Logger.Printf("linear: could not record Senapati's comment thread %s: %v", thread, err)
+		}
+	}
+	ping, ok, why := Classify(eventType, body, h.Self, h.Threads)
+	if !ok {
+		h.Logger.Printf("linear: not forwarded - %s", why)
+		return
+	}
+	sainiks := ""
+	if h.Sainiks != nil {
+		sainiks = h.Sainiks(ping.Issue)
+	}
+	if err := h.Forward.Forward(Format(ping, sainiks)); err != nil {
+		h.Logger.Printf("linear: failed to forward ping to senapati: %v", err)
+	}
 }
 
 func logDelivery(logger *log.Logger, eventType, deliveryID string, body []byte) {

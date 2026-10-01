@@ -26,6 +26,8 @@ type PromptSender interface {
 	Prompt(ctx context.Context, sessionID string, req opencode.PromptRequest) (opencode.PromptResponse, error)
 	SwitchModel(ctx context.Context, sessionID string, model opencode.SessionModel) error
 	SwitchAgent(ctx context.Context, sessionID, agent string) error
+	SetPermissions(ctx context.Context, sessionID string, rules []opencode.PermissionRule) error
+	PutInstruction(ctx context.Context, sessionID, key, value string) error
 	ListModels(ctx context.Context) ([]opencode.ModelInfo, error)
 	LatestAssistantMessage(ctx context.Context, sessionID string) (opencode.AssistantMessage, bool, error)
 }
@@ -135,9 +137,11 @@ func (m *Manager) Start(ctx context.Context, req opencode.CreateSessionRequest) 
 }
 
 // prepare makes the current session ready to act as Senapati. A resumed one
-// is pinned to the configured agent and model first, because it may predate
-// that config (a session made without a model silently runs on whatever the
-// server's default is). Then it is briefed, once.
+// is pinned to the configured agent, model and permissions first, because it
+// may predate that config (a session made without a model silently runs on
+// whatever the server's default is; one made without the permissions can do
+// the work itself instead of handing it to a sainik). Then its role is
+// installed, and a session that has never been briefed is told about it.
 func (m *Manager) prepare(ctx context.Context, resumed bool) error {
 	id := m.SessionID()
 	if resumed {
@@ -151,18 +155,45 @@ func (m *Manager) prepare(ctx context.Context, resumed bool) error {
 				return fmt.Errorf("switching Senapati to model %s/%s: %w", md.ProviderID, md.ID, err)
 			}
 		}
+		if p := m.baseReq.Permissions; p != nil {
+			if err := m.client.SetPermissions(ctx, id, p); err != nil {
+				return fmt.Errorf("restricting Senapati's tools: %w", err)
+			}
+		}
 	}
-	if m.briefing == nil || m.Current().BriefedAt != nil {
-		return nil
-	}
-	text, err := m.briefing()
-	if err != nil {
+	first, err := m.install(ctx, id)
+	if err != nil || first == "" || m.Current().BriefedAt != nil {
 		return err
 	}
-	if err := m.sendMessage(ctx, id, text); err != nil {
+	if err := m.sendMessage(ctx, id, first); err != nil {
 		return fmt.Errorf("briefing Senapati: %w", err)
 	}
 	return m.markBriefed()
+}
+
+// activation is the first message of a session whose role is installed as a
+// durable instruction: the role itself is already in front of it.
+const activation = "You are now running as Senapati. Your role, tools and rules are in your instructions " +
+	"(" + InstructionKey + "); they replace anything earlier in this conversation. " +
+	"Reply to this with one short line; do not act on it."
+
+// install puts the briefing on the session as a durable instruction - on
+// every start, so an edited instructions file reaches a resumed session -
+// and returns the first message such a session should get: the short
+// activation, or, when the server cannot hold instruction entries, the
+// whole briefing as before. "" means there is no briefing configured.
+func (m *Manager) install(ctx context.Context, id string) (first string, err error) {
+	if m.briefing == nil {
+		return "", nil
+	}
+	text, err := m.briefing()
+	if err != nil {
+		return "", err
+	}
+	if err := m.client.PutInstruction(ctx, id, InstructionKey, text); err != nil {
+		return text + "\n\nReply to this briefing with one short line; do not act on it.", nil
+	}
+	return activation, nil
 }
 
 func (m *Manager) markBriefed() error {
@@ -352,14 +383,10 @@ func (m *Manager) rotateIfNeeded(ctx context.Context) error {
 	// the old one. If the briefing can't be built the handoff still goes out
 	// and the problem is reported; the session simply stays un-briefed.
 	text := HandoffSummary(sainiks, old.SessionID)
-	briefed := false
-	var briefErr error
-	if m.briefing != nil {
-		if b, err := m.briefing(); err != nil {
-			briefErr = err
-		} else {
-			text, briefed = b+"\n\n"+text, true
-		}
+	first, briefErr := m.install(ctx, rec.SessionID)
+	briefed := briefErr == nil && first != ""
+	if briefed {
+		text = first + "\n\n" + text
 	}
 	if err := m.sendMessage(ctx, rec.SessionID, text); err != nil {
 		return fmt.Errorf("sending handoff to %s: %w", rec.Title, err)

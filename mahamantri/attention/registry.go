@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -43,6 +45,36 @@ type Instance struct {
 	Reason      string          `json:"reason,omitempty"`
 	LastEvent   *opencode.Event `json:"lastEvent,omitempty"`
 	LastEventAt time.Time       `json:"lastEventAt,omitzero"`
+}
+
+// sainikTitle is how sainiks are titled: sainik-<issue>-<slug>.
+var sainikTitle = regexp.MustCompile(`^sainik-([A-Za-z][A-Za-z0-9]*-[0-9]+)(?:-|$)`)
+
+// Issue is the Linear issue identifier the instance works on, read from its
+// sainik-<issue>-<slug> label, or "" if it isn't named that way.
+func (i Instance) Issue() string {
+	if m := sainikTitle.FindStringSubmatch(i.Label); m != nil {
+		return strings.ToUpper(m[1])
+	}
+	return ""
+}
+
+// ForIssue returns the instances working on a Linear issue.
+func (r *Registry) ForIssue(issue string) []Instance {
+	var out []Instance
+	for _, inst := range r.List() {
+		if issue != "" && strings.EqualFold(inst.Issue(), issue) {
+			out = append(out, inst)
+		}
+	}
+	return out
+}
+
+// IsProtected reports whether sessionID is Senapati's own session.
+func (r *Registry) IsProtected(sessionID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return sessionID != "" && sessionID == r.protected
 }
 
 type Registry struct {
