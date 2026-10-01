@@ -92,6 +92,11 @@ func run(configPath string) error {
 	}
 	go reg.PollFile(ctx, 3*time.Second)
 
+	threads, err := linear.LoadThreads(cfg.State.LinearThreadsFile)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w (fix or delete it)", cfg.State.LinearThreadsFile, err)
+	}
+
 	// Fail now, not at the next rotation, if the instructions file is unreadable.
 	if _, err := senapati.LoadInstructions(cfg.Senapati.InstructionsFile); err != nil {
 		return err
@@ -116,7 +121,12 @@ func run(configPath string) error {
 			Instructions:  instructions,
 		}), nil
 	})
-	createReq := opencode.CreateSessionRequest{Agent: cfg.Senapati.Agent}
+	// Senapati can call mahamantri and use Linear, nothing else - so the
+	// work has nowhere to go but a sainik (see senapati.Permissions).
+	createReq := opencode.CreateSessionRequest{
+		Agent:       cfg.Senapati.Agent,
+		Permissions: senapati.Permissions(httpURL(cfg.Attention.ListenAddr), cfg.Senapati.ExtraPermissions),
+	}
 	if cfg.Senapati.Directory != "" {
 		createReq.Location = &opencode.SessionLocation{Directory: cfg.Senapati.Directory}
 	}
@@ -175,7 +185,14 @@ func run(configPath string) error {
 		Agent:        cfg.Sainik.Agent,
 	})
 	attnSrv := &http.Server{Handler: mux}
-	linearSrv := &http.Server{Handler: linear.NewHandler(cfg.Linear.SigningSecret, linear.Identity{UserID: cfg.Linear.BotUserID, Name: cfg.Linear.BotName, Handle: cfg.Linear.BotHandle}, mgr, logger)}
+	linearSrv := &http.Server{Handler: &linear.Handler{
+		Secret:  cfg.Linear.SigningSecret,
+		Self:    linear.Identity{UserID: cfg.Linear.BotUserID, Name: cfg.Linear.BotName, Handle: cfg.Linear.BotHandle},
+		Threads: threads,
+		Sainiks: senapati.IssueSainiks(reg),
+		Forward: mgr,
+		Logger:  logger,
+	}}
 	go attnSrv.Serve(attnLn)
 	go linearSrv.Serve(linearLn)
 

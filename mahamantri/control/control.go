@@ -33,6 +33,8 @@ type Backend interface {
 type Registrar interface {
 	Register(sessionID, label string) (attention.Instance, error)
 	Update(sessionID string, label, phase *string) (attention.Instance, error)
+	ForIssue(issue string) []attention.Instance
+	IsProtected(sessionID string) bool
 }
 
 // Options are the defaults for sessions Senapati spawns.
@@ -51,7 +53,7 @@ func Routes(mux *http.ServeMux, be Backend, reg Registrar, opt Options) {
 	mux.HandleFunc("POST /sainiks", handleSpawn(be, reg, opt))
 	mux.HandleFunc("POST /sainiks/{id}/message", handleMessage(be))
 	mux.HandleFunc("GET /sainiks/{id}/status", handleStatus(be))
-	mux.Handle(GatewayPrefix+"/", tagPrompts(be.Proxy(GatewayPrefix)))
+	mux.Handle(GatewayPrefix+"/", guardGateway(reg, tagPrompts(be.Proxy(GatewayPrefix))))
 }
 
 type spawnRequest struct {
@@ -62,6 +64,9 @@ type spawnRequest struct {
 	Agent     string `json:"agent"`
 	Directory string `json:"directory"`
 	Phase     string `json:"phase"`
+	// Parallel allows a second sainik on an issue that already has one -
+	// for an issue that splits into independent parts.
+	Parallel bool `json:"parallel"`
 }
 
 // handleSpawn creates a session titled sainik-<issue>-<slug>, registers it,
@@ -75,6 +80,19 @@ func handleSpawn(be Backend, reg Registrar, opt Options) http.HandlerFunc {
 		}
 		if strings.TrimSpace(req.Issue) == "" || strings.TrimSpace(req.Task) == "" {
 			attention.WriteError(w, http.StatusBadRequest, `"issue" and "task" are required`)
+			return
+		}
+
+		// One issue, one sainik: it carries the issue's context from planning
+		// to done, and a second one would redo that work from scratch.
+		if existing := reg.ForIssue(req.Issue); len(existing) > 0 && !req.Parallel {
+			inst := existing[0]
+			attention.WriteJSON(w, http.StatusConflict, map[string]string{
+				"error": fmt.Sprintf("%s already has a sainik: %q (session %s). Send it the new work with POST /sainiks/%s/message "+
+					"instead of starting another. Pass \"parallel\": true only if the issue splits into independent parts.",
+					req.Issue, inst.Label, inst.SessionID, inst.SessionID),
+				"sessionID": inst.SessionID,
+			})
 			return
 		}
 
@@ -104,7 +122,7 @@ func handleSpawn(be Backend, reg Registrar, opt Options) http.HandlerFunc {
 		}
 		phase := firstNonEmpty(req.Phase, "started")
 		reg.Update(info.ID, nil, &phase)
-		if _, err := be.Prompt(r.Context(), info.ID, senapatiPrompt(req.Task)); err != nil {
+		if _, err := be.Prompt(r.Context(), info.ID, senapatiPrompt(req.Task, "queue")); err != nil {
 			attention.WriteError(w, http.StatusBadGateway, fmt.Sprintf("session %s was created and registered but the task could not be sent: %v", info.ID, err))
 			return
 		}
@@ -112,13 +130,22 @@ func handleSpawn(be Backend, reg Registrar, opt Options) http.HandlerFunc {
 	}
 }
 
-// handleMessage sends a message to a session. With "interrupt": true the
-// session is interrupted first - the only way to reach one that is inside a
-// long tool call, since `steer` delivery still waits for the tool to finish.
+// handleMessage sends a message to a session, delivered one of three ways:
+//   - "queue" (default): after the turn it is on now - immediately if it is
+//     idle. Live-verified: the queued message runs as part of the same
+//     execution, so the one completion notice comes after both. This is how
+//     Senapati hands over a non-urgent update without waiting for anything.
+//   - "steer": at its next step, inside the current turn.
+//   - "interrupt": stop it now (a running tool call included), then send -
+//     the only way to reach one inside a long tool call, since `steer`
+//     still waits for the tool to finish.
+//
+// "interrupt": true is still accepted as the older spelling of the last one.
 func handleMessage(be Backend) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Text      string `json:"text"`
+			Delivery  string `json:"delivery"`
 			Interrupt bool   `json:"interrupt"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -129,19 +156,29 @@ func handleMessage(be Backend) http.HandlerFunc {
 			attention.WriteError(w, http.StatusBadRequest, `"text" is required`)
 			return
 		}
-		id := r.PathValue("id")
+		delivery := firstNonEmpty(req.Delivery, "queue")
 		if req.Interrupt {
+			delivery = "interrupt"
+		}
+		if delivery != "queue" && delivery != "steer" && delivery != "interrupt" {
+			attention.WriteError(w, http.StatusBadRequest, `"delivery" must be "queue" (after its current turn), "steer" (at its next step) or "interrupt" (stop it now)`)
+			return
+		}
+		id := r.PathValue("id")
+		mode := delivery
+		if delivery == "interrupt" {
 			if err := be.Interrupt(r.Context(), id); err != nil {
 				backendError(w, "interrupting the session", err)
 				return
 			}
+			mode = "steer"
 		}
-		resp, err := be.Prompt(r.Context(), id, senapatiPrompt(req.Text))
+		resp, err := be.Prompt(r.Context(), id, senapatiPrompt(req.Text, mode))
 		if err != nil {
 			backendError(w, "sending the message", err)
 			return
 		}
-		attention.WriteJSON(w, http.StatusOK, map[string]any{"messageID": resp.ID, "interrupted": req.Interrupt})
+		attention.WriteJSON(w, http.StatusOK, map[string]any{"messageID": resp.ID, "delivery": delivery})
 	}
 }
 
@@ -156,14 +193,38 @@ func handleStatus(be Backend) http.HandlerFunc {
 	}
 }
 
-// senapatiPrompt builds a prompt tagged as Senapati's. `steer` delivery puts
-// it in front of the session's next step rather than behind its whole turn.
-func senapatiPrompt(text string) opencode.PromptRequest {
+// senapatiPrompt builds a prompt tagged as Senapati's.
+func senapatiPrompt(text, delivery string) opencode.PromptRequest {
 	return opencode.PromptRequest{
 		Text:     text,
-		Delivery: "steer",
+		Delivery: delivery,
 		Metadata: map[string]string{"source": attention.SourceSenapati},
 	}
+}
+
+var (
+	waitPath    = regexp.MustCompile(`^` + GatewayPrefix + `/api/(?:experimental/)?session/[^/]+/wait$`)
+	sessionPath = regexp.MustCompile(`^` + GatewayPrefix + `/api/(?:experimental/)?session/([^/]+)(?:/|$)`)
+)
+
+// guardGateway refuses the two things through the gateway that would undo
+// how Senapati is meant to work: blocking until a session goes idle (it is
+// told when a sainik finishes; it never waits), and changing its own session
+// - which is how it would lift the permissions that keep it from doing the
+// work itself. Reading its own session is fine.
+func guardGateway(reg Registrar, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if waitPath.MatchString(r.URL.Path) {
+			attention.WriteError(w, http.StatusForbidden, "Senapati never waits on a session: Mahamantri messages you when a sainik "+
+				"finishes, fails or is blocked. End your turn instead.")
+			return
+		}
+		if m := sessionPath.FindStringSubmatch(r.URL.Path); m != nil && r.Method != http.MethodGet && reg.IsProtected(m[1]) {
+			attention.WriteError(w, http.StatusForbidden, "that is your own Senapati session; it is managed by Mahamantri")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 var promptPath = regexp.MustCompile(`^` + GatewayPrefix + `/api/session/[^/]+/prompt$`)

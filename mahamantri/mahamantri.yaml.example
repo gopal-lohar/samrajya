@@ -10,10 +10,13 @@ opencode:
 linear:
   signingSecret: ""          # empty falls back to $LINEAR_SIGNING_SECRET
   listenAddr: "127.0.0.1:45821"
-  # Senapati's own Linear account. Events are worded from its point of view
-  # ("assigned to you", "mentioned you"), and its own actions are logged but
-  # not fed back to it. botHandle is what comments @-mention it as - often the
-  # local part of the account's email, not its display name.
+  # Senapati's own Linear account - required. Senapati is pinged for exactly
+  # two things: a person's comment that @-mentions botHandle, and a person's
+  # reply in a comment thread Senapati has written in (recognised by
+  # botUserID). Every other delivery - issue edits, status, labels,
+  # assignment, its own comments - is logged and dropped. botHandle is often
+  # the local part of the account's email, not its display name; botUserID is
+  # actor.id on any comment Senapati made, in mahamantri.log.
   botUserID: ""
   botName: ""                # defaults to "Senapati"
   botHandle: ""
@@ -22,6 +25,16 @@ attention:
   registryFile: "./mahamantri-registry.json"
 state:
   senapatiFile: "./mahamantri-senapati.json"   # holds the current + retired Senapati session IDs
+  linearThreadsFile: "./mahamantri-linear-threads.json"   # comment threads Senapati has written in
+sainik:
+  directory: ""              # working directory for sainik sessions (the repo they work in)
+  defaultModel: ""           # provider/id used when Senapati names none, e.g. openai/gpt-6-sol
+  agent: ""                  # opencode agent for sainiks, optional
+# Models Senapati may choose for a sainik, with guidance it reads in its briefing.
+models: []
+#  - id: openai/gpt-6-sol
+#    credits: scarce
+#    use: hard reasoning and tricky debugging
 senapati:
   agent: ""                  # opencode custom-agent name, optional
   directory: ""              # optional session working directory
@@ -35,3 +48,9 @@ senapati:
   # service URLs). Agent-file frontmatter is ignored.
   instructionsFile: "../senapati/senapati.md"
   rotationThreshold: 0.4     # fraction of the model's context limit that triggers a new Senapati session
+  # Senapati's tools are restricted to curl to mahamantri, jq and the Linear
+  # MCP tools (linear_*), so the work can only go to a sainik. Rules added here
+  # come after those (the last matching rule wins); "ask" is not allowed -
+  # nobody is there to answer it.
+  extraPermissions: []
+  #  - {action: "github_*", resource: "*", effect: allow}

@@ -73,10 +73,15 @@ func (f *fakeBackend) Proxy(prefix string) http.Handler {
 }
 
 type fakeReg struct {
-	calls  *[]string
-	regErr error
-	phases map[string]string
+	calls     *[]string
+	regErr    error
+	phases    map[string]string
+	byIssue   map[string][]attention.Instance
+	protected string
 }
+
+func (f *fakeReg) ForIssue(issue string) []attention.Instance { return f.byIssue[issue] }
+func (f *fakeReg) IsProtected(id string) bool                 { return id == f.protected }
 
 func (f *fakeReg) Register(id, label string) (attention.Instance, error) {
 	*f.calls = append(*f.calls, "register:"+label)
@@ -121,7 +126,7 @@ func TestSpawnCreatesRegistersThenSendsTheTaskInThatOrder(t *testing.T) {
 		t.Errorf("created = %+v (model %+v)", c, c.Model)
 	}
 	p := be.prompts[0]
-	if p.Text != "Plan it, do not execute yet." || p.Metadata["source"] != "senapati" || p.Delivery != "steer" {
+	if p.Text != "Plan it, do not execute yet." || p.Metadata["source"] != "senapati" || p.Delivery != "queue" {
 		t.Errorf("task prompt = %+v", p)
 	}
 	if reg.phases["ses_new"] != "started" {
@@ -193,11 +198,51 @@ func TestMessageWithInterruptInterruptsFirstThenSends(t *testing.T) {
 	}
 }
 
-func TestMessageWithoutInterruptDoesNotInterrupt(t *testing.T) {
+// The default is to queue: a busy sainik gets the message when its current
+// turn ends, so Senapati hands over a non-urgent update and moves on.
+func TestMessageQueuesByDefaultWithoutInterrupting(t *testing.T) {
 	mux, be, _ := setup(t, Options{})
-	do(mux, "POST", "/sainiks/ses_a/message", `{"text":"one more thing"}`)
-	if strings.Join(be.calls, ",") != "prompt:ses_a" {
-		t.Errorf("calls = %v", be.calls)
+	rec := do(mux, "POST", "/sainiks/ses_a/message", `{"text":"one more thing"}`)
+	if strings.Join(be.calls, ",") != "prompt:ses_a" || be.prompts[0].Delivery != "queue" {
+		t.Errorf("calls = %v prompts = %+v", be.calls, be.prompts)
+	}
+	if !strings.Contains(rec.Body.String(), `"delivery":"queue"`) {
+		t.Errorf("response = %s", rec.Body)
+	}
+}
+
+func TestMessageDeliveryModes(t *testing.T) {
+	for body, want := range map[string]string{
+		`{"text":"x","delivery":"queue"}`:     "prompt:ses_a/queue",
+		`{"text":"x","delivery":"steer"}`:     "prompt:ses_a/steer",
+		`{"text":"x","delivery":"interrupt"}`: "interrupt:ses_a,prompt:ses_a/steer",
+		`{"text":"x","interrupt":true}`:       "interrupt:ses_a,prompt:ses_a/steer",
+	} {
+		mux, be, _ := setup(t, Options{})
+		if rec := do(mux, "POST", "/sainiks/ses_a/message", body); rec.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", body, rec.Code, rec.Body)
+		}
+		if got := strings.Join(be.calls, ",") + "/" + be.prompts[0].Delivery; got != want {
+			t.Errorf("%s -> %s, want %s", body, got, want)
+		}
+	}
+	mux, be, _ := setup(t, Options{})
+	if rec := do(mux, "POST", "/sainiks/ses_a/message", `{"text":"x","delivery":"later"}`); rec.Code != http.StatusBadRequest || len(be.calls) != 0 {
+		t.Errorf("unknown delivery: %d calls=%v", rec.Code, be.calls)
+	}
+}
+
+// One issue, one sainik: a second spawn for the same issue is refused and
+// points at the one that exists, unless the split is deliberate.
+func TestSpawnRefusesASecondSainikForTheSameIssue(t *testing.T) {
+	mux, be, reg := setup(t, Options{})
+	reg.byIssue = map[string][]attention.Instance{"SEN-31": {{SessionID: "ses_old", Label: "sainik-SEN-31-plan"}}}
+	rec := do(mux, "POST", "/sainiks", `{"issue":"SEN-31","task":"x"}`)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "/sainiks/ses_old/message") || len(be.calls) != 0 {
+		t.Errorf("duplicate spawn: %d %s calls=%v", rec.Code, rec.Body, be.calls)
+	}
+	if rec := do(mux, "POST", "/sainiks", `{"issue":"SEN-31","task":"x","parallel":true}`); rec.Code != http.StatusCreated {
+		t.Errorf("parallel spawn: %d %s", rec.Code, rec.Body)
 	}
 }
 
@@ -235,6 +280,41 @@ func TestGatewayTagsPromptsAsSenapatisAndPreservesTheRest(t *testing.T) {
 	json.Unmarshal([]byte(be.proxiedBody[1]), &sent)
 	if sent["metadata"].(map[string]any)["source"] != "senapati" {
 		t.Errorf("source was not forced: %v", sent)
+	}
+}
+
+func TestGatewayRefusesToWait(t *testing.T) {
+	mux, be, _ := setup(t, Options{})
+	for _, path := range []string{"/opencode/api/experimental/session/ses_a/wait", "/opencode/api/session/ses_a/wait"} {
+		if rec := do(mux, "POST", path, ""); rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "never waits") {
+			t.Errorf("%s: %d %s", path, rec.Code, rec.Body)
+		}
+	}
+	if len(be.proxied) != 0 {
+		t.Error("a wait request reached opencode")
+	}
+}
+
+// Senapati must not be able to lift its own permissions through the gateway.
+func TestGatewayProtectsSenapatisOwnSession(t *testing.T) {
+	mux, be, reg := setup(t, Options{})
+	reg.protected = "ses_senapati"
+	for _, c := range []struct{ method, path string }{
+		{"PATCH", "/opencode/api/session/ses_senapati"},
+		{"POST", "/opencode/api/session/ses_senapati/agent"},
+		{"DELETE", "/opencode/api/experimental/session/ses_senapati/instructions/entries/samrajya.senapati"},
+	} {
+		if rec := do(mux, c.method, c.path, `{"permissions":[]}`); rec.Code != http.StatusForbidden {
+			t.Errorf("%s %s: %d", c.method, c.path, rec.Code)
+		}
+	}
+	if len(be.proxied) != 0 {
+		t.Errorf("reached opencode: %d requests", len(be.proxied))
+	}
+	do(mux, "GET", "/opencode/api/session/ses_senapati", "")
+	do(mux, "PATCH", "/opencode/api/session/ses_sainik", `{"title":"x"}`)
+	if len(be.proxied) != 2 {
+		t.Errorf("reading its own session and changing a sainik must pass: %d proxied", len(be.proxied))
 	}
 }
 

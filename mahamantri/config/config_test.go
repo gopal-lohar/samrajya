@@ -16,6 +16,8 @@ opencode:
 linear:
   signingSecret: lin_wh_test
   listenAddr: ":45821"
+  botUserID: "076c966a-da5b-447e-a890-4b0648465fbb"
+  botHandle: "gingermagenta"
 attention:
   listenAddr: "127.0.0.1:4097"
   registryFile: "./registry.json"
@@ -186,5 +188,44 @@ func TestMalformedModelReferencesAreRejected(t *testing.T) {
 		if _, err := Load(writeConfig(t, y)); err == nil {
 			t.Errorf("a model without a provider should be rejected:\n%s", y)
 		}
+	}
+}
+
+// The webhook filter depends on knowing who Senapati is on Linear: without
+// its user id its own comments come back as pings (the noise the user saw).
+func TestLinearIdentityIsRequired(t *testing.T) {
+	for _, key := range []string{"botUserID", "botHandle"} {
+		var kept []string
+		for _, line := range strings.Split(validYAML, "\n") {
+			if !strings.Contains(line, key+":") {
+				kept = append(kept, line)
+			}
+		}
+		if _, err := Load(writeConfig(t, strings.Join(kept, "\n"))); err == nil || !strings.Contains(err.Error(), "linear."+key) {
+			t.Errorf("without %s: err = %v", key, err)
+		}
+	}
+}
+
+func TestLinearThreadsFileDefaultsNextToTheConfig(t *testing.T) {
+	path := writeConfig(t, validYAML)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(filepath.Dir(path), "mahamantri-linear-threads.json"); c.State.LinearThreadsFile != want {
+		t.Errorf("linearThreadsFile = %q, want %q", c.State.LinearThreadsFile, want)
+	}
+}
+
+func TestExtraPermissions(t *testing.T) {
+	ok := strings.Replace(validYAML, "  rotationThreshold: 0.4", "  rotationThreshold: 0.4\n  extraPermissions:\n    - {action: github_*, resource: \"*\", effect: allow}", 1)
+	c, err := Load(writeConfig(t, ok))
+	if err != nil || len(c.Senapati.ExtraPermissions) != 1 || c.Senapati.ExtraPermissions[0].Action != "github_*" {
+		t.Fatalf("Load = %+v, %v", c.Senapati.ExtraPermissions, err)
+	}
+	ask := strings.Replace(ok, "effect: allow", "effect: ask", 1)
+	if _, err := Load(writeConfig(t, ask)); err == nil || !strings.Contains(err.Error(), "extraPermissions[0]") {
+		t.Errorf("an ask rule would hang Senapati and must be rejected: %v", err)
 	}
 }
