@@ -1,15 +1,23 @@
-// Package control is what Senapati uses to manage opencode sessions: a few
-// shortcuts for the operations it does constantly, plus a gateway to the
-// entire opencode API. Senapati never holds opencode credentials - mahamantri
-// does - and everything it sends is tagged as its own, which is how a person
-// stepping in is told apart from it.
+// Package control is how Senapati manages opencode sessions: the opencode API
+// itself, through a gateway that holds the credentials. Senapati calls the
+// real API - create a session, prompt it, interrupt it, read its messages,
+// answer its permission requests - and the gateway only adds what has to be
+// true of every call:
+//
+//   - creating a session makes a sainik: its title must name the issue
+//     (sainik-<ISSUE>-<slug>), an issue gets one sainik, the configured
+//     defaults are filled in (permissions, directory, model, agent), and it
+//     is registered so Senapati hears about it;
+//   - every prompt is tagged as Senapati's (that is how a person stepping in
+//     is told apart from it) and delivered "queue" unless it says otherwise;
+//   - an interrupt is recorded as Senapati's own, not a person's;
+//   - deleting a session unregisters it;
+//   - waiting on a session, and changing Senapati's own session, are refused.
 package control
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -22,286 +30,249 @@ import (
 
 // Backend is the opencode client, as far as this package needs it.
 type Backend interface {
-	CreateSession(ctx context.Context, req opencode.CreateSessionRequest) (opencode.SessionInfo, error)
-	Prompt(ctx context.Context, sessionID string, req opencode.PromptRequest) (opencode.PromptResponse, error)
-	Interrupt(ctx context.Context, sessionID string) error
-	Snapshot(ctx context.Context, sessionID string) (opencode.Snapshot, error)
 	Proxy(stripPrefix string) http.Handler
 }
 
 // Registrar is the attention registry, as far as this package needs it.
 type Registrar interface {
 	Register(sessionID, label string) (attention.Instance, error)
-	Update(sessionID string, label, phase *string) (attention.Instance, error)
+	Unregister(sessionID string) error
 	ForIssue(issue string) []attention.Instance
 	IsProtected(sessionID string) bool
+	ExpectInterrupt(sessionID string)
 }
 
-// Options are the defaults for sessions Senapati spawns.
+// Options are the defaults for the sainik sessions Senapati creates. Each is
+// applied only when the request doesn't set it itself.
 type Options struct {
-	Directory    string // working directory for new sessions; empty = server default
-	DefaultModel string // "provider/id" used when a spawn names no model
+	Directory    string // working directory; empty = the server's default
+	DefaultModel string // provider/id
 	Agent        string
+	Permissions  []opencode.PermissionRule
 }
 
 // GatewayPrefix is where the opencode API is mounted, e.g.
 // GET /opencode/api/session/<id>/message.
 const GatewayPrefix = "/opencode"
 
-// Routes registers the sainik operations and the gateway on mux.
+// Routes registers the gateway, and an API description on every other path.
 func Routes(mux *http.ServeMux, be Backend, reg Registrar, opt Options) {
-	mux.HandleFunc("POST /sainiks", handleSpawn(be, reg, opt))
-	mux.HandleFunc("POST /sainiks/{id}/message", handleMessage(be))
-	mux.HandleFunc("GET /sainiks/{id}/status", handleStatus(be))
-	mux.Handle(GatewayPrefix+"/", guardGateway(reg, tagPrompts(be.Proxy(GatewayPrefix))))
-}
-
-type spawnRequest struct {
-	Issue     string `json:"issue"`
-	Slug      string `json:"slug"`
-	Task      string `json:"task"`
-	Model     string `json:"model"`
-	Agent     string `json:"agent"`
-	Directory string `json:"directory"`
-	Phase     string `json:"phase"`
-	// Parallel allows a second sainik on an issue that already has one -
-	// for an issue that splits into independent parts.
-	Parallel bool `json:"parallel"`
-}
-
-// handleSpawn creates a session titled sainik-<issue>-<slug>, registers it,
-// and sends it the task - in that order, so none of its events are missed.
-func handleSpawn(be Backend, reg Registrar, opt Options) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var req spawnRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			attention.WriteError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		if strings.TrimSpace(req.Issue) == "" || strings.TrimSpace(req.Task) == "" {
-			attention.WriteError(w, http.StatusBadRequest, `"issue" and "task" are required`)
-			return
-		}
-
-		// One issue, one sainik: it carries the issue's context from planning
-		// to done, and a second one would redo that work from scratch.
-		if existing := reg.ForIssue(req.Issue); len(existing) > 0 && !req.Parallel {
-			inst := existing[0]
-			attention.WriteJSON(w, http.StatusConflict, map[string]string{
-				"error": fmt.Sprintf("%s already has a sainik: %q (session %s). Send it the new work with POST /sainiks/%s/message "+
-					"instead of starting another. Pass \"parallel\": true only if the issue splits into independent parts.",
-					req.Issue, inst.Label, inst.SessionID, inst.SessionID),
-				"sessionID": inst.SessionID,
-			})
-			return
-		}
-
-		title := "sainik-" + req.Issue + "-" + slugify(req.Slug)
-		modelRef := firstNonEmpty(req.Model, opt.DefaultModel)
-		create := opencode.CreateSessionRequest{Title: title, Agent: firstNonEmpty(req.Agent, opt.Agent)}
-		if modelRef != "" {
-			m, err := ParseModel(modelRef)
-			if err != nil {
-				attention.WriteError(w, http.StatusBadRequest, err.Error())
-				return
-			}
-			create.Model = &m
-		}
-		if dir := firstNonEmpty(req.Directory, opt.Directory); dir != "" {
-			create.Location = &opencode.SessionLocation{Directory: dir}
-		}
-
-		info, err := be.CreateSession(r.Context(), create)
-		if err != nil {
-			backendError(w, "creating the session", err)
-			return
-		}
-		if _, err := reg.Register(info.ID, title); err != nil {
-			attention.WriteError(w, http.StatusInternalServerError, fmt.Sprintf("session %s was created but could not be registered: %v", info.ID, err))
-			return
-		}
-		phase := firstNonEmpty(req.Phase, "started")
-		reg.Update(info.ID, nil, &phase)
-		if _, err := be.Prompt(r.Context(), info.ID, senapatiPrompt(req.Task, "queue")); err != nil {
-			attention.WriteError(w, http.StatusBadGateway, fmt.Sprintf("session %s was created and registered but the task could not be sent: %v", info.ID, err))
-			return
-		}
-		attention.WriteJSON(w, http.StatusCreated, map[string]string{"sessionID": info.ID, "title": title, "model": modelRef})
-	}
-}
-
-// handleMessage sends a message to a session, delivered one of three ways:
-//   - "queue" (default): after the turn it is on now - immediately if it is
-//     idle. Live-verified: the queued message runs as part of the same
-//     execution, so the one completion notice comes after both. This is how
-//     Senapati hands over a non-urgent update without waiting for anything.
-//   - "steer": at its next step, inside the current turn.
-//   - "interrupt": stop it now (a running tool call included), then send -
-//     the only way to reach one inside a long tool call, since `steer`
-//     still waits for the tool to finish.
-//
-// "interrupt": true is still accepted as the older spelling of the last one.
-func handleMessage(be Backend) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Text      string `json:"text"`
-			Delivery  string `json:"delivery"`
-			Interrupt bool   `json:"interrupt"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			attention.WriteError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		if strings.TrimSpace(req.Text) == "" {
-			attention.WriteError(w, http.StatusBadRequest, `"text" is required`)
-			return
-		}
-		delivery := firstNonEmpty(req.Delivery, "queue")
-		if req.Interrupt {
-			delivery = "interrupt"
-		}
-		if delivery != "queue" && delivery != "steer" && delivery != "interrupt" {
-			attention.WriteError(w, http.StatusBadRequest, `"delivery" must be "queue" (after its current turn), "steer" (at its next step) or "interrupt" (stop it now)`)
-			return
-		}
-		id := r.PathValue("id")
-		mode := delivery
-		if delivery == "interrupt" {
-			if err := be.Interrupt(r.Context(), id); err != nil {
-				backendError(w, "interrupting the session", err)
-				return
-			}
-			mode = "steer"
-		}
-		resp, err := be.Prompt(r.Context(), id, senapatiPrompt(req.Text, mode))
-		if err != nil {
-			backendError(w, "sending the message", err)
-			return
-		}
-		attention.WriteJSON(w, http.StatusOK, map[string]any{"messageID": resp.ID, "delivery": delivery})
-	}
-}
-
-func handleStatus(be Backend) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		snap, err := be.Snapshot(r.Context(), r.PathValue("id"))
-		if err != nil {
-			backendError(w, "reading the session", err)
-			return
-		}
-		attention.WriteJSON(w, http.StatusOK, snap)
-	}
-}
-
-// senapatiPrompt builds a prompt tagged as Senapati's.
-func senapatiPrompt(text, delivery string) opencode.PromptRequest {
-	return opencode.PromptRequest{
-		Text:     text,
-		Delivery: delivery,
-		Metadata: map[string]string{"source": attention.SourceSenapati},
-	}
+	g := &gateway{proxy: be.Proxy(GatewayPrefix), reg: reg, opt: opt}
+	mux.Handle(GatewayPrefix+"/", g)
+	mux.HandleFunc("/", handleHelp)
 }
 
 var (
-	waitPath    = regexp.MustCompile(`^` + GatewayPrefix + `/api/(?:experimental/)?session/[^/]+/wait$`)
-	sessionPath = regexp.MustCompile(`^` + GatewayPrefix + `/api/(?:experimental/)?session/([^/]+)(?:/|$)`)
+	createPath    = regexp.MustCompile(`^` + GatewayPrefix + `/api/session/?$`)
+	promptPath    = regexp.MustCompile(`^` + GatewayPrefix + `/api/session/([^/]+)/prompt$`)
+	interruptPath = regexp.MustCompile(`^` + GatewayPrefix + `/api/session/([^/]+)/interrupt$`)
+	waitPath      = regexp.MustCompile(`^` + GatewayPrefix + `/api/(?:experimental/)?session/[^/]+/wait$`)
+	sessionPath   = regexp.MustCompile(`^` + GatewayPrefix + `/api/(?:experimental/)?session/([^/]+)(/.*)?$`)
+	sainikTitle   = regexp.MustCompile(`^sainik-([A-Za-z][A-Za-z0-9]*-[0-9]+)-[a-z0-9][a-z0-9-]*$`)
 )
 
-// guardGateway refuses the two things through the gateway that would undo
-// how Senapati is meant to work: blocking until a session goes idle (it is
-// told when a sainik finishes; it never waits), and changing its own session
-// - which is how it would lift the permissions that keep it from doing the
-// work itself. Reading its own session is fine.
-func guardGateway(reg Registrar, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if waitPath.MatchString(r.URL.Path) {
-			attention.WriteError(w, http.StatusForbidden, "Senapati never waits on a session: Mahamantri messages you when a sainik "+
-				"finishes, fails or is blocked. End your turn instead.")
-			return
-		}
-		if m := sessionPath.FindStringSubmatch(r.URL.Path); m != nil && r.Method != http.MethodGet && reg.IsProtected(m[1]) {
-			attention.WriteError(w, http.StatusForbidden, "that is your own Senapati session; it is managed by Mahamantri")
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+type gateway struct {
+	proxy http.Handler
+	reg   Registrar
+	opt   Options
 }
 
-var promptPath = regexp.MustCompile(`^` + GatewayPrefix + `/api/session/[^/]+/prompt$`)
-
-// tagPrompts stamps metadata.source = "senapati" on every prompt that goes
-// through the gateway. Anything arriving here is Senapati's, and the tag is
-// what keeps manual-takeover detection from mistaking it for a person.
-func tagPrompts(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && promptPath.MatchString(r.URL.Path) {
-			body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 5<<20))
-			if err != nil {
-				http.Error(w, "request body too large or unreadable", http.StatusBadRequest)
-				return
-			}
-			var m map[string]any
-			if json.Unmarshal(body, &m) == nil {
-				md, _ := m["metadata"].(map[string]any)
-				if md == nil {
-					md = map[string]any{}
-				}
-				md["source"] = attention.SourceSenapati
-				m["metadata"] = md
-				body, _ = json.Marshal(m)
-			}
-			r.Body = io.NopCloser(bytes.NewReader(body))
-			r.ContentLength = int64(len(body))
-			r.Header.Set("Content-Length", fmt.Sprint(len(body)))
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-// ParseModel turns "provider/id" into a model reference.
-func ParseModel(ref string) (opencode.SessionModel, error) {
-	provider, id, ok := strings.Cut(ref, "/")
-	if !ok || provider == "" || id == "" {
-		return opencode.SessionModel{}, fmt.Errorf("model %q must look like provider/id, e.g. openai/gpt-6-sol", ref)
-	}
-	return opencode.SessionModel{ProviderID: provider, ID: id}, nil
-}
-
-var nonSlug = regexp.MustCompile(`[^a-z0-9]+`)
-
-// slugify makes a short lowercase, dash-separated title fragment.
-func slugify(s string) string {
-	s = strings.Trim(nonSlug.ReplaceAllString(strings.ToLower(s), "-"), "-")
-	if s == "" {
-		return "task"
-	}
-	if len(s) > 40 {
-		s = strings.Trim(s[:40], "-")
-	}
-	return s
-}
-
-func firstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if v != "" {
-			return v
-		}
-	}
-	return ""
-}
-
-// backendError turns an opencode failure into a response that says what was
-// being attempted and what the server said.
-func backendError(w http.ResponseWriter, doing string, err error) {
-	status := http.StatusBadGateway
-	switch {
-	case errors.Is(err, opencode.ErrSessionNotFound):
-		status = http.StatusNotFound
-	case errors.Is(err, opencode.ErrBadRequest):
-		status = http.StatusBadRequest
-	case errors.Is(err, opencode.ErrUnauthorized):
-		attention.WriteError(w, http.StatusBadGateway, "mahamantri's opencode password was rejected while "+doing+" - update opencode.password in mahamantri.yaml")
+func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Path
+	if waitPath.MatchString(path) {
+		attention.WriteError(w, http.StatusForbidden, "Senapati never waits on a session: Mahamantri messages you when a sainik "+
+			"finishes, fails or needs an answer. End your turn instead.")
 		return
 	}
-	attention.WriteError(w, status, fmt.Sprintf("%s: %v", doing, err))
+	if m := sessionPath.FindStringSubmatch(path); m != nil && r.Method != http.MethodGet && g.reg.IsProtected(m[1]) {
+		attention.WriteError(w, http.StatusForbidden, "that is your own Senapati session; it is managed by Mahamantri")
+		return
+	}
+	switch {
+	case r.Method == http.MethodPost && createPath.MatchString(path):
+		g.createSainik(w, r)
+		return
+	case r.Method == http.MethodPost && promptPath.MatchString(path):
+		if !tagPrompt(w, r) {
+			return
+		}
+	case r.Method == http.MethodPost && interruptPath.MatchString(path):
+		g.reg.ExpectInterrupt(interruptPath.FindStringSubmatch(path)[1])
+	case r.Method == http.MethodDelete:
+		if m := sessionPath.FindStringSubmatch(path); m != nil && m[2] == "" {
+			rec := record(g.proxy, r)
+			if rec.status < 300 {
+				g.reg.Unregister(m[1]) // not registered is fine
+			}
+			rec.copyTo(w)
+			return
+		}
+	}
+	g.proxy.ServeHTTP(w, r)
+}
+
+// createSainik is POST /api/session: checked, defaulted, forwarded, and the
+// new session registered before the response goes back - so it is watched
+// before Senapati can send it anything.
+func (g *gateway) createSainik(w http.ResponseWriter, r *http.Request) {
+	body, ok := readJSON(w, r)
+	if !ok {
+		return
+	}
+	title, _ := body["title"].(string)
+	m := sainikTitle.FindStringSubmatch(title)
+	if m == nil {
+		attention.WriteError(w, http.StatusBadRequest, fmt.Sprintf("title %q: a sainik's title must be sainik-<ISSUE>-<slug>, "+
+			"e.g. \"sainik-SEN-33-request-info\" (lowercase slug) - it is how Linear pings about the issue find it", title))
+		return
+	}
+	issue := strings.ToUpper(m[1])
+	q := r.URL.Query()
+	if existing := g.reg.ForIssue(issue); len(existing) > 0 && q.Get("parallel") != "true" {
+		inst := existing[0]
+		attention.WriteJSON(w, http.StatusConflict, map[string]string{
+			"error": fmt.Sprintf("%s already has a sainik: %q (session %s). Prompt that session instead of starting another; "+
+				"add ?parallel=true only if the issue splits into independent parts.", issue, inst.Label, inst.SessionID),
+			"sessionID": inst.SessionID,
+		})
+		return
+	}
+	q.Del("parallel")
+	r.URL.RawQuery = q.Encode()
+
+	if _, set := body["permissions"]; !set && g.opt.Permissions != nil {
+		body["permissions"] = g.opt.Permissions
+	}
+	if _, set := body["location"]; !set && g.opt.Directory != "" {
+		body["location"] = map[string]string{"directory": g.opt.Directory}
+	}
+	if _, set := body["model"]; !set && g.opt.DefaultModel != "" {
+		if provider, id, ok := strings.Cut(g.opt.DefaultModel, "/"); ok {
+			body["model"] = map[string]string{"providerID": provider, "id": id}
+		}
+	}
+	if _, set := body["agent"]; !set && g.opt.Agent != "" {
+		body["agent"] = g.opt.Agent
+	}
+	setBody(r, body)
+
+	rec := record(g.proxy, r)
+	if rec.status < 300 {
+		var created struct {
+			Data struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		if json.Unmarshal(rec.body.Bytes(), &created) == nil && created.Data.ID != "" {
+			if _, err := g.reg.Register(created.Data.ID, title); err != nil {
+				rec.header.Set("X-Mahamantri-Warning", "session created but not registered - you will not hear about it: "+err.Error())
+			}
+		}
+	}
+	rec.copyTo(w)
+}
+
+// tagPrompt stamps metadata.source = "senapati" on a prompt, which keeps
+// manual-takeover detection from mistaking it for a person, and makes
+// "queue" (after the session's current turn) the delivery when none is
+// given. A body that isn't a JSON object is passed through for opencode to
+// reject. It reports false if it already answered the request.
+func tagPrompt(w http.ResponseWriter, r *http.Request) bool {
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 5<<20))
+	if err != nil {
+		http.Error(w, "request body too large or unreadable", http.StatusBadRequest)
+		return false
+	}
+	var body map[string]any
+	if json.Unmarshal(raw, &body) != nil || body == nil {
+		r.Body = io.NopCloser(bytes.NewReader(raw))
+		return true
+	}
+	md, _ := body["metadata"].(map[string]any)
+	if md == nil {
+		md = map[string]any{}
+	}
+	md["source"] = attention.SourceSenapati
+	body["metadata"] = md
+	if d, _ := body["delivery"].(string); d == "" {
+		body["delivery"] = "queue"
+	}
+	setBody(r, body)
+	return true
+}
+
+func readJSON(w http.ResponseWriter, r *http.Request) (map[string]any, bool) {
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 5<<20))
+	if err != nil {
+		http.Error(w, "request body too large or unreadable", http.StatusBadRequest)
+		return nil, false
+	}
+	body := map[string]any{}
+	if len(bytes.TrimSpace(raw)) > 0 {
+		if err := json.Unmarshal(raw, &body); err != nil {
+			attention.WriteError(w, http.StatusBadRequest, "body must be a JSON object: "+err.Error())
+			return nil, false
+		}
+	}
+	return body, true
+}
+
+func setBody(r *http.Request, body map[string]any) {
+	data, _ := json.Marshal(body)
+	r.Body = io.NopCloser(bytes.NewReader(data))
+	r.ContentLength = int64(len(data))
+	r.Header.Set("Content-Length", fmt.Sprint(len(data)))
+	r.Header.Set("Content-Type", "application/json")
+}
+
+// recorded is a response held back so the gateway can act on it before
+// passing it on.
+type recorded struct {
+	status int
+	header http.Header
+	body   bytes.Buffer
+}
+
+func record(h http.Handler, r *http.Request) *recorded {
+	rec := &recorded{status: http.StatusOK, header: http.Header{}}
+	h.ServeHTTP(rec, r)
+	return rec
+}
+
+func (rec *recorded) Header() http.Header         { return rec.header }
+func (rec *recorded) Write(b []byte) (int, error) { return rec.body.Write(b) }
+func (rec *recorded) WriteHeader(status int)      { rec.status = status }
+
+func (rec *recorded) copyTo(w http.ResponseWriter) {
+	for k, v := range rec.header {
+		if k != "Content-Length" {
+			w.Header()[k] = v
+		}
+	}
+	w.WriteHeader(rec.status)
+	w.Write(rec.body.Bytes())
+}
+
+// Usage is what Mahamantri answers on any path it doesn't serve. Senapati,
+// when unsure, probes for an API description; a bare "404 page not found"
+// sent it off guessing, so the answer is the API itself.
+const Usage = `Mahamantri (no auth). The opencode API is at /opencode/api/..., credentials handled; full description at /opencode/openapi.json.
+  POST   /opencode/api/session                         create a sainik: {"title":"sainik-SEN-1-short-name"} (one per issue; add ?parallel=true to override)
+  POST   /opencode/api/session/{id}/prompt             send it work: {"text":"...","delivery":"queue"} (queue = after its current turn; "steer" = at its next step)
+  POST   /opencode/api/session/{id}/interrupt          stop it now (then prompt it)
+  GET    /opencode/api/session/active                  sessions running right now (absent = idle)
+  GET    /opencode/api/session/{id}/message?type=assistant&order=desc&limit=1   its latest reply
+  GET    /opencode/api/session/{id}/permission         its pending permission requests; answer with POST .../permission/{requestID}/reply {"decision":"once|always|reject"}
+  GET    /opencode/api/session/{id}/form               its pending questions; answer with POST .../form/{formID}/reply {"answer":{...}}
+  GET    /instances                                    registered sainiks with status and phase
+  PATCH  /instances/{id}                               record its phase: {"phase":"..."}
+  DELETE /instances/{id}                               stop watching a sainik (DELETE /opencode/api/session/{id} deletes it)`
+
+func handleHelp(w http.ResponseWriter, r *http.Request) {
+	status := http.StatusNotFound
+	msg := r.Method + " " + r.URL.Path + " is not a Mahamantri endpoint"
+	if r.URL.Path == "/" {
+		status, msg = http.StatusOK, "Mahamantri"
+	}
+	attention.WriteJSON(w, status, map[string]string{"error": msg, "usage": Usage})
 }

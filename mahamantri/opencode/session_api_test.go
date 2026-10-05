@@ -93,31 +93,49 @@ func TestListModels(t *testing.T) {
 	}
 }
 
-func TestLatestAssistantMessage(t *testing.T) {
-	// Live-verified: GET /api/session/{id}/message returns newest-first.
-	// Listed in that order, with distinct Time.Created values, so the test
-	// exercises timestamp comparison rather than list order.
-	user := rawMessage{ID: "msg_3", Type: "user"}
-	user.Time.Created = 300
-	done := rawMessage{ID: "msg_2", Type: "assistant", Tokens: TokenUsage{Input: 100, Output: 50}}
-	done.Model.ID, done.Model.ProviderID = "gpt-6-sol", "openai"
-	done.Time.Created, done.Time.Completed = 200, 250
-	older := rawMessage{ID: "msg_1", Type: "assistant", Tokens: TokenUsage{Input: 1}}
-	older.Time.Created, older.Time.Completed = 100, 150
-	// A newer, still-streaming step with no tokens yet must be skipped.
-	streaming := rawMessage{ID: "msg_4", Type: "assistant"}
-	streaming.Time.Created = 400
+// The shape of a real GET /api/session/{id}/message?type=assistant&order=desc
+// page from opencode 2.0.18: a {data, cursor} envelope, newest first, entries
+// with object-valued metadata, a still-streaming newest step, tool parts.
+const assistantPage = `{"data":[
+ {"id":"msg_4","type":"assistant","metadata":{"instruction":{"paths":["/repo/AGENTS.md"]}},"time":{"created":400},"model":{"id":"gpt-6-sol","providerID":"openai"},"content":[{"type":"reasoning","text":"thinking"}]},
+ {"id":"msg_3","type":"assistant","time":{"created":300,"completed":350},"model":{"id":"gpt-6-sol","providerID":"openai"},"tokens":{"input":100,"output":50,"reasoning":0,"cache":{"read":5000,"write":0}},
+  "content":[{"type":"text","text":"Plan:\n1. do it"},{"type":"text","text":"Questions: none"}]},
+ {"id":"msg_2","type":"assistant","time":{"created":200,"completed":250},"model":{"id":"gpt-6-sol","providerID":"openai"},"tokens":{"input":1},
+  "content":[{"type":"tool","name":"shell","state":{"status":"completed","input":{"command":"ls"}}}]}
+],"cursor":{"previous":"p","next":"n"}}`
 
+func TestRecentAssistantMessagesAsksForANewestFirstAssistantPage(t *testing.T) {
+	var query string
 	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"data": []rawMessage{streaming, user, done, older}})
+		query = r.URL.Path + "?" + r.URL.RawQuery
+		w.Write([]byte(assistantPage))
 	})
+	if _, _, err := c.LatestAssistantMessage(context.Background(), "ses_1"); err != nil {
+		t.Fatal(err)
+	}
+	if query != "/api/session/ses_1/message?type=assistant&order=desc&limit=20" {
+		t.Errorf("query = %q", query)
+	}
+}
 
+// Regression: object-valued metadata made this fail with "cannot unmarshal
+// object into Go struct field .metadata.instruction of type string".
+func TestLatestAssistantMessageSkipsStreamingStepsAndToleratesAnyMetadata(t *testing.T) {
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(assistantPage)) })
 	asst, ok, err := c.LatestAssistantMessage(context.Background(), "ses_1")
 	if err != nil || !ok {
 		t.Fatalf("ok=%v err=%v", ok, err)
 	}
-	if asst.ID != "msg_2" || asst.ModelID != "gpt-6-sol" || asst.Tokens.Input != 100 {
-		t.Errorf("LatestAssistantMessage = %+v, want the newest completed one (msg_2)", asst)
+	if asst.ID != "msg_3" || asst.ModelID != "gpt-6-sol" || asst.Tokens.Cache.Read != 5000 {
+		t.Errorf("LatestAssistantMessage = %+v, want the newest completed one (msg_3)", asst)
+	}
+}
+
+func TestLastReplyIsTheNewestText(t *testing.T) {
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(assistantPage)) })
+	got, err := c.LastReply(context.Background(), "ses_1")
+	if err != nil || got != "Plan:\n1. do it\n\nQuestions: none" {
+		t.Errorf("LastReply = %q, %v", got, err)
 	}
 }
 

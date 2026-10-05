@@ -50,11 +50,15 @@ func deliver(t *testing.T, h http.Handler, secret, body string, mutate func(*htt
 func TestHandlerForwardsAMentionWithItsSainik(t *testing.T) {
 	f := &fakeForwarder{}
 	h := newHandler(t, f, &bytes.Buffer{})
-	h.Sainiks = func(issue string) string { return "- sainik-" + issue + "-fix: running" }
+	h.Sainiks = func(issue string) []Sainik {
+		return []Sainik{{Label: "sainik-" + issue + "-fix", SessionID: "ses_k", Status: "running"}}
+	}
+	h.Mahamantri = "http://127.0.0.1:4097"
 	if rec := deliver(t, h, "s3cret", mentionBody, nil); rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
 	}
-	if len(f.got) != 1 || !strings.Contains(f.got[0], "[Linear ping] SEN-31") || !strings.Contains(f.got[0], "sainik-SEN-31-fix: running") {
+	if len(f.got) != 1 || !strings.Contains(f.got[0], "[Linear ping] SEN-31") || !strings.Contains(f.got[0], `"sainik-SEN-31-fix" (session ses_k): running`) ||
+		!strings.Contains(f.got[0], "http://127.0.0.1:4097/opencode/api/session/ses_k/prompt") {
 		t.Errorf("forwarded = %q", f.got)
 	}
 }

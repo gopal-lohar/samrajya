@@ -10,61 +10,6 @@ import (
 	"time"
 )
 
-func msg(id, typ string, created int64) rawMessage {
-	m := rawMessage{ID: id, Type: typ}
-	m.Time.Created = created
-	return m
-}
-
-func toolPart(name, status, command string) rawContent {
-	c := rawContent{Type: "tool", Name: name}
-	c.State.Status = status
-	c.State.Input = map[string]any{"command": command}
-	return c
-}
-
-// Shape captured from a live server while a shell tool ran `sleep 102`.
-func TestSnapshotShowsWhatABusySessionIsDoingRightNow(t *testing.T) {
-	user := msg("u1", "user", time.Date(2026, 9, 25, 10, 0, 0, 0, time.UTC).UnixMilli())
-	asst := msg("a1", "assistant", user.Time.Created+1000)
-	asst.Model.ID, asst.Model.ProviderID, asst.Cost = "gpt-6-sol", "openai", 0.25
-	asst.Content = []rawContent{{Type: "text", Text: "Running the test suite now."}, toolPart("shell", "running", "sleep 102")}
-	earlier := msg("a0", "assistant", user.Time.Created-5000)
-	earlier.Cost = 0.10
-
-	now := time.Date(2026, 9, 25, 10, 47, 12, 0, time.UTC)
-	s := buildSnapshot(SessionInfo{ID: "ses_1", Title: "sainik-SEN-30-x"}, []rawMessage{asst, user, earlier}, true, now)
-
-	if s.State != "running" || s.RunningFor != "47m12s" {
-		t.Errorf("state=%q runningFor=%q", s.State, s.RunningFor)
-	}
-	if s.Doing == nil || s.Doing.Tool != "shell" || s.Doing.Input != "sleep 102" {
-		t.Errorf("doing = %+v, want the shell command in flight", s.Doing)
-	}
-	if s.LastText != "Running the test suite now." || s.Model != "openai/gpt-6-sol" {
-		t.Errorf("lastText=%q model=%q", s.LastText, s.Model)
-	}
-	if s.CostUSD < 0.349 || s.CostUSD > 0.351 || s.Messages != 3 {
-		t.Errorf("cost=%v messages=%d, want 0.35 and 3", s.CostUSD, s.Messages)
-	}
-}
-
-func TestSnapshotOfAnIdleSessionHasNoActivity(t *testing.T) {
-	asst := msg("a1", "assistant", 100)
-	asst.Content = []rawContent{toolPart("shell", "completed", "ls"), {Type: "text", Text: "Done."}}
-	s := buildSnapshot(SessionInfo{ID: "ses_1"}, []rawMessage{asst}, false, time.Now())
-	if s.State != "idle" || s.Doing != nil || s.RunningFor != "" || s.LastText != "Done." {
-		t.Errorf("snapshot = %+v", s)
-	}
-}
-
-func TestSnapshotOfAnEmptySession(t *testing.T) {
-	s := buildSnapshot(SessionInfo{ID: "ses_1"}, nil, false, time.Now())
-	if s.State != "idle" || s.Messages != 0 || s.Model != "" {
-		t.Errorf("snapshot = %+v", s)
-	}
-}
-
 func TestInterruptPostsToTheInterruptEndpoint(t *testing.T) {
 	var got string
 	c := testClient(t, func(w http.ResponseWriter, r *http.Request) { got = r.Method + " " + r.URL.Path })

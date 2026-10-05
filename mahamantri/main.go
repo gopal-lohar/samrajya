@@ -90,6 +90,11 @@ func run(configPath string) error {
 	if err := reg.ReloadFromDisk(); err != nil {
 		return fmt.Errorf("reading %s: %w (fix or delete it)", cfg.Attention.RegistryFile, err)
 	}
+	if running, err := client.ActiveSessions(ctx); err == nil {
+		reg.SeedRunning(running)
+	} else {
+		logger.Printf("could not read which sessions are running: %v", err)
+	}
 	go reg.PollFile(ctx, 3*time.Second)
 
 	threads, err := linear.LoadThreads(cfg.State.LinearThreadsFile)
@@ -145,8 +150,11 @@ func run(configPath string) error {
 
 	// One subscriber, in order: Observe first so the registry's status is
 	// settled for this event, then the takeover/attention checks that may
-	// override or act on it.
-	events := bcast.Subscribe(64)
+	// override or act on it. The broadcaster drops what a full buffer can't
+	// take, and a dropped completion is a sainik Senapati never hears about
+	// - so this one is sized for bursts.
+	base := httpURL(cfg.Attention.ListenAddr)
+	events := bcast.Subscribe(4096)
 	go func() {
 		for ev := range events {
 			reg.Observe(ev)
@@ -160,14 +168,34 @@ func run(configPath string) error {
 			}
 			// Judged on the registered session itself only: its subagents
 			// receive task prompts from opencode that carry no tag.
+			// Senapati's own interrupt (through mahamantri) is not a person
+			// stepping in, and needs no notice: its message follows it.
+			if ev.Type == "session.execution.interrupted" && ev.SessionID == instID && reg.TakeExpectedInterrupt(instID) {
+				continue
+			}
 			if action, manual := attention.DetectManualTakeover(ev); manual && ev.SessionID == instID {
 				reg.MarkManual(instID, "a person intervened")
 				forward(logger, mgr, senapati.SummarizeManualTakeover(inst, action))
 				continue
 			}
-			if reg.NeedsAttention(ev) {
-				forward(logger, mgr, senapati.SummarizeEvent(ev, inst))
+			if !reg.NeedsAttention(ev) {
+				continue
 			}
+			if ev.SessionID == instID && (ev.Type == "session.execution.succeeded" || ev.Type == "session.execution.failed" || ev.Type == "session.idle") {
+				// The notice carries the sainik's report; reading it is an
+				// HTTP call, kept off this loop.
+				go func(ev opencode.Event, inst attention.Instance) {
+					rctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+					defer cancel()
+					reply, err := client.LastReply(rctx, inst.SessionID)
+					if err != nil {
+						logger.Printf("reading %s's final reply: %v", inst.SessionID, err)
+					}
+					forward(logger, mgr, senapati.SummarizeEvent(ev, inst, reply, base))
+				}(ev, inst)
+				continue
+			}
+			forward(logger, mgr, senapati.SummarizeEvent(ev, inst, "", base))
 		}
 	}()
 
@@ -175,23 +203,25 @@ func run(configPath string) error {
 		info, err := client.GetSession(ctx, id)
 		return info.Title, err
 	}
-	// One local API: the attention API, the sainik operations, and the
-	// gateway to the whole opencode API (credentials held here, not by Senapati).
+	// One local API: the attention API and the gateway to the whole opencode
+	// API (credentials held here, not by Senapati).
 	mux := http.NewServeMux()
 	attention.Routes(mux, reg, bcast, lookup)
 	control.Routes(mux, client, reg, control.Options{
 		Directory:    cfg.Sainik.Directory,
 		DefaultModel: cfg.Sainik.DefaultModel,
 		Agent:        cfg.Sainik.Agent,
+		Permissions:  senapati.SainikPermissions(),
 	})
 	attnSrv := &http.Server{Handler: mux}
 	linearSrv := &http.Server{Handler: &linear.Handler{
-		Secret:  cfg.Linear.SigningSecret,
-		Self:    linear.Identity{UserID: cfg.Linear.BotUserID, Name: cfg.Linear.BotName, Handle: cfg.Linear.BotHandle},
-		Threads: threads,
-		Sainiks: senapati.IssueSainiks(reg),
-		Forward: mgr,
-		Logger:  logger,
+		Secret:     cfg.Linear.SigningSecret,
+		Self:       linear.Identity{UserID: cfg.Linear.BotUserID, Name: cfg.Linear.BotName, Handle: cfg.Linear.BotHandle},
+		Threads:    threads,
+		Sainiks:    senapati.IssueSainiks(reg),
+		Mahamantri: base,
+		Forward:    mgr,
+		Logger:     logger,
 	}}
 	go attnSrv.Serve(attnLn)
 	go linearSrv.Serve(linearLn)

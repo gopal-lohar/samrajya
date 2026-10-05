@@ -40,8 +40,10 @@ func TestPermissionsLetSenapatiOrchestrateButNotWork(t *testing.T) {
 }'`},
 		{"shell", `curl -s "http://127.0.0.1:4097/sainiks/ses_1/status"`},
 		{"shell", "jq .state"},
+		{"execute", "*"},
 		{"linear_get_issue", "*"},
-		{"linear_create_comment", "*"},
+		{"linear_list_teams", "*"},
+		{"linear_save_comment", "*"},
 	}
 	for _, c := range allowed {
 		if got := decide(rules, c.action, c.resource); got != "allow" {
@@ -81,5 +83,35 @@ func TestExtraPermissionsWidenButCannotLiftTheNoWaitRules(t *testing.T) {
 	}
 	if decide(rules, "shell", "sleep 30") != "deny" {
 		t.Error("sleep must stay denied")
+	}
+}
+
+// Regression: Senapati said "I don't have a Linear read tool". MCP tools are
+// only reachable through `execute`, which the rules had denied.
+func TestLinearIsReachableThroughExecute(t *testing.T) {
+	rules := Permissions("http://127.0.0.1:4097", nil)
+	if decide(rules, "execute", "*") != "allow" {
+		t.Fatal("execute must be allowed, or no MCP tool is reachable at all")
+	}
+	if decide(rules, "chrome-devtools_navigate_page", "*") != "deny" || decide(rules, "opencode_session_move", "*") != "deny" {
+		t.Error("inside execute, only Linear may be callable")
+	}
+}
+
+// Regression: the first sainik blocked on an external_directory "ask" that
+// nobody could answer.
+func TestSainiksAreNeverAskedAnything(t *testing.T) {
+	build := []opencode.PermissionRule{ // opencode 2.0.18's build agent defaults
+		{Action: "*", Resource: "*", Effect: "allow"},
+		{Action: "external_directory", Resource: "*", Effect: "ask"},
+		{Action: "read", Resource: "*.env", Effect: "ask"},
+	}
+	rules := append(build, SainikPermissions()...)
+	for _, c := range []struct{ action, resource string }{
+		{"external_directory", "/home/ubuntu/*"}, {"read", "/repo/.env"}, {"shell", "go test ./..."}, {"edit", "main.go"},
+	} {
+		if got := decide(rules, c.action, c.resource); got != "allow" {
+			t.Errorf("%s %s = %s, want allow", c.action, c.resource, got)
+		}
 	}
 }

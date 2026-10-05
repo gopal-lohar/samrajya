@@ -131,7 +131,7 @@ func TestThreadsPersist(t *testing.T) {
 
 func TestFormatSaysItIsAPingAndHowToRouteIt(t *testing.T) {
 	p, _, _ := Classify("Comment", []byte(mentionBody), senapati, nil)
-	got := Format(p, "")
+	got := Format(p, nil, "http://127.0.0.1:4097")
 	for _, want := range []string{
 		"[Linear ping] SEN-31",
 		"Gopal mentioned you in a comment",
@@ -144,5 +144,36 @@ func TestFormatSaysItIsAPingAndHowToRouteIt(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("Format() missing %q:\n%s", want, got)
 		}
+	}
+}
+
+// Regression: left to work out the API, Senapati probed endpoints that don't
+// exist and gave up. Every ping spells out the exact command for its case.
+func TestFormatGivesTheExactCommandForEachCase(t *testing.T) {
+	p, _, _ := Classify("Comment", []byte(mentionBody), senapati, nil)
+
+	none := Format(p, nil, "http://127.0.0.1:4097")
+	for _, want := range []string{
+		`curl -s -X POST http://127.0.0.1:4097/opencode/api/session -H 'Content-Type: application/json' -d '{"title":"sainik-SEN-31-<short-name>"}'`,
+		`curl -s -X POST http://127.0.0.1:4097/opencode/api/session/<id>/prompt`,
+	} {
+		if !strings.Contains(none, want) {
+			t.Errorf("no sainik: missing %q:\n%s", want, none)
+		}
+	}
+
+	busy := Format(p, []Sainik{{Label: "sainik-SEN-31-fix", SessionID: "ses_k", Status: "running", Phase: "executing"}}, "http://127.0.0.1:4097")
+	for _, want := range []string{
+		`"sainik-SEN-31-fix" (session ses_k): running (busy with a turn), phase "executing"`,
+		`curl -s -X POST http://127.0.0.1:4097/opencode/api/session/ses_k/prompt`,
+		`curl -s -X POST http://127.0.0.1:4097/opencode/api/session/ses_k/interrupt`,
+		`curl -s http://127.0.0.1:4097/opencode/api/session/active | jq '.data["ses_k"]'`,
+	} {
+		if !strings.Contains(busy, want) {
+			t.Errorf("with a sainik: missing %q:\n%s", want, busy)
+		}
+	}
+	if strings.Contains(busy, "/opencode/api/session -H") {
+		t.Errorf("with a sainik, the ping must not offer to start another:\n%s", busy)
 	}
 }

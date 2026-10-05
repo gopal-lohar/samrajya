@@ -62,3 +62,12 @@ func TestDetectManualTakeoverIgnoresNonUserItemsAndOtherEvents(t *testing.T) {
 		t.Error("an event with no payload was flagged as manual")
 	}
 }
+
+// Senapati's prompts can carry object-valued metadata next to the source tag;
+// that must not make them unreadable (and so mistaken for a person).
+func TestDetectManualTakeoverToleratesObjectMetadata(t *testing.T) {
+	ev := opencode.Event{Type: "session.inbox.enqueued", Raw: []byte(`{"item":{"type":"user","payload":{"text":"x","metadata":{"source":"senapati","ctx":{"issue":"SEN-1"}}}}}`)}
+	if _, manual := DetectManualTakeover(ev); manual {
+		t.Error("a tagged Senapati message was taken for a person")
+	}
+}

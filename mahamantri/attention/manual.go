@@ -35,15 +35,15 @@ func DetectManualTakeover(ev opencode.Event) (action string, ok bool) {
 			Item struct {
 				Type    string `json:"type"`
 				Payload struct {
-					Text     string            `json:"text"`
-					Metadata map[string]string `json:"metadata"`
+					Text     string         `json:"text"`
+					Metadata map[string]any `json:"metadata"`
 				} `json:"payload"`
 			} `json:"item"`
 		}
 		if err := json.Unmarshal(ev.Raw, &data); err != nil || data.Item.Type != "user" {
 			return "", false
 		}
-		source := data.Item.Payload.Metadata["source"]
+		source, _ := data.Item.Payload.Metadata["source"].(string)
 		if source == SourceMahamantri || source == SourceSenapati {
 			return "", false
 		}

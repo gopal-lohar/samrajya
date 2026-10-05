@@ -170,12 +170,21 @@ func ownComment(body []byte, self Identity) (threadID, issue string, ok bool) {
 	return firstNonEmpty(env.Data.ParentID, env.Data.ID), firstNonEmpty(env.Data.Issue.Identifier, env.Data.IssueID), true
 }
 
-// Format is the message Senapati receives for p. sainiks describes the
-// issue's sainik session(s) as mahamantri knows them right now ("" if
-// none). It is worded as what it is - a notification that the issue has
-// news, to be handled against the issue as a whole - because a bare
-// comment pasted into Senapati reads like a person chatting with it.
-func Format(p Ping, sainiks string) string {
+// Sainik is what mahamantri knows about a sainik working on the issue.
+type Sainik struct {
+	Label     string
+	SessionID string
+	Status    string // running | idle | blocked | manual
+	Phase     string
+}
+
+// Format is the message Senapati receives for p. It is worded as what it is -
+// a notification that the issue has news, to be handled against the issue as
+// a whole - because a bare comment pasted into Senapati reads like a person
+// chatting with it. It ends with the exact commands for routing it, against
+// mahamantri at mahamantriURL: left to work out the API itself, Senapati
+// probed for endpoints that don't exist and gave up.
+func Format(p Ping, sainiks []Sainik, mahamantriURL string) string {
 	var b strings.Builder
 	what := "mentioned you in a comment"
 	if p.Kind == "reply" {
@@ -187,16 +196,56 @@ func Format(p Ping, sainiks string) string {
 		fmt.Fprintf(&b, "Link: %s\n", p.URL)
 	}
 	b.WriteString("\n")
-	if sainiks == "" {
+
+	if len(sainiks) == 0 {
 		fmt.Fprintf(&b, "Sainik for %s: none yet.\n", p.Issue)
 	} else {
-		fmt.Fprintf(&b, "Sainik for %s:\n%s\n", p.Issue, sainiks)
+		fmt.Fprintf(&b, "Sainik for %s:\n", p.Issue)
+		for _, s := range sainiks {
+			fmt.Fprintf(&b, "- %q (session %s): %s", s.Label, s.SessionID, describeStatus(s.Status))
+			if s.Phase != "" {
+				fmt.Fprintf(&b, ", phase %q", s.Phase)
+			}
+			b.WriteString("\n")
+		}
 	}
+
 	fmt.Fprintf(&b, "\nThis is a notification, not a person chatting with you. Handle it as \"Handling a Linear ping\" says: "+
 		"re-read %s and this thread on Linear, then route it - to the sainik (queued if it is busy and this is not urgent, "+
 		"interrupt only if it is), to a new sainik if there is none and work is asked for, or answer on Linear yourself "+
-		"if no work is needed. Do not investigate it yourself, and do not wait for anything: end your turn once it is routed.", p.Issue)
+		"if no work is needed. Do not investigate it yourself, and do not wait for anything: end your turn once it is routed.\n", p.Issue)
+
+	if mahamantriURL != "" {
+		b.WriteString("\nCommands (fill in the <...> parts; run them exactly like this - plain curl, optionally piped to jq):\n")
+		api := mahamantriURL + "/opencode/api/session"
+		if len(sainiks) == 0 {
+			fmt.Fprintf(&b, "Start its sainik - create the session, then send it the task:\n"+
+				"  curl -s -X POST %s -H 'Content-Type: application/json' -d '{\"title\":\"sainik-%s-<short-name>\"}' | jq -r .data.id\n"+
+				"  curl -s -X POST %s/<id>/prompt -H 'Content-Type: application/json' -d '{\"text\":\"<self-contained task; tell it to read %s on Linear itself>\"}'\n",
+				api, p.Issue, api, p.Issue)
+		} else {
+			id := sainiks[0].SessionID
+			fmt.Fprintf(&b, "Send its sainik what is new (queued: it gets it after its current turn):\n"+
+				"  curl -s -X POST %s/%s/prompt -H 'Content-Type: application/json' -d '{\"text\":\"<what is new>\"}'\n", api, id)
+			fmt.Fprintf(&b, "Only if this cannot wait, stop it first:\n  curl -s -X POST %s/%s/interrupt\n", api, id)
+			fmt.Fprintf(&b, "Is it running right now (absent = idle):\n  curl -s %s/active | jq '.data[\"%s\"]'\n", api, id)
+		}
+	}
 	return b.String()
+}
+
+func describeStatus(status string) string {
+	switch status {
+	case "running":
+		return "running (busy with a turn)"
+	case "idle":
+		return "idle (waiting for its next instruction)"
+	case "blocked":
+		return "blocked (needs a decision)"
+	case "manual":
+		return "being used by a person directly - leave it alone"
+	}
+	return status
 }
 
 func issueLabel(p Ping) string {

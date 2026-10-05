@@ -28,15 +28,26 @@ type sessionLifecycle struct {
 	ParentID  string `json:"parentID"`
 }
 
+// permissionAsked and formCreated carry the request's id, which is what a
+// reply is addressed to (POST /api/session/{id}/permission/{requestID}/reply,
+// .../form/{formID}/reply) - so the notice has to say it.
 type permissionAsked struct {
+	ID        string   `json:"id"`
 	SessionID string   `json:"sessionID"`
 	Action    string   `json:"action"`
 	Resources []string `json:"resources"`
 }
 
+// formCreated is wrapped, unlike every other session event:
+// {"form":{"id","sessionID","title","fields":[...]}} (verified live, 2.0.18).
+// Reading sessionID from the top level - as an earlier version did - left
+// every question unattributed, so Senapati never heard a sainik was waiting.
 type formCreated struct {
-	SessionID string `json:"sessionID"`
-	Title     string `json:"title"`
+	Form struct {
+		ID        string `json:"id"`
+		SessionID string `json:"sessionID"`
+		Title     string `json:"title"`
+	} `json:"form"`
 }
 
 type sessionErrorEvent struct {
@@ -71,13 +82,14 @@ func classify(env envelope, sessions *sessionTracker) Event {
 		var p permissionAsked
 		json.Unmarshal(env.Data, &p)
 		ev.Severity = Blocking
-		ev.Summary = fmt.Sprintf("permission requested: %s on %v", p.Action, p.Resources)
+		ev.Summary = fmt.Sprintf("permission request %s: %s on %v", p.ID, p.Action, p.Resources)
 
 	case "form.created":
 		var f formCreated
 		json.Unmarshal(env.Data, &f)
+		ev.SessionID = f.Form.SessionID
 		ev.Severity = Blocking
-		ev.Summary = fmt.Sprintf("form awaiting reply: %q", f.Title)
+		ev.Summary = fmt.Sprintf("question %s awaiting an answer: %q", f.Form.ID, f.Form.Title)
 
 	case "session.error":
 		var e sessionErrorEvent
@@ -112,12 +124,17 @@ func classify(env envelope, sessions *sessionTracker) Event {
 	return ev
 }
 
+// classifySessionError never reports Blocking: opencode retries rate limits
+// and provider errors itself (session.retry.scheduled), and one it gives up
+// on ends the turn with session.execution.failed - that is the notice.
+// Calling a retried 429 "blocked" told Senapati to act on something that
+// resolves by itself.
 func classifySessionError(err *structuredError) (Severity, string) {
 	if err == nil {
 		return Info, "session.error"
 	}
-	if err.Status == 429 || err.Status == 402 || err.Status >= 500 {
-		return Blocking, fmt.Sprintf("session error (%s, status %d): %s", err.Type, err.Status, err.Message)
+	if err.Status != 0 {
+		return Warning, fmt.Sprintf("session error (%s, status %d): %s", err.Type, err.Status, err.Message)
 	}
 	return Warning, fmt.Sprintf("session error (%s): %s", err.Type, err.Message)
 }

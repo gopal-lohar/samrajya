@@ -107,20 +107,47 @@ func TestRegistryObserveStatusTransitions(t *testing.T) {
 	if _, err := r.Register("ses_a", ""); err != nil {
 		t.Fatal(err)
 	}
-
-	r.Observe(opencode.Event{SessionID: "ses_a", Type: "permission.asked", Severity: opencode.Blocking})
-	if inst, _ := r.Get("ses_a"); inst.Status != "blocked" || inst.Reason != "permission.asked" {
-		t.Errorf("after Blocking event: status=%q reason=%q", inst.Status, inst.Reason)
+	step := func(ev opencode.Event, want string) {
+		t.Helper()
+		r.Observe(ev)
+		if inst, _ := r.Get("ses_a"); inst.Status != want {
+			t.Errorf("after %s: status=%q, want %q", ev.Type, inst.Status, want)
+		}
 	}
+	step(opencode.Event{SessionID: "ses_a", Type: "session.execution.started"}, "running")
+	step(opencode.Event{SessionID: "ses_a", Type: "permission.asked", Severity: opencode.Blocking, Summary: "permission request per_1"}, "blocked")
+	step(opencode.Event{SessionID: "ses_a", Type: "permission.replied"}, "running")
+	step(opencode.Event{SessionID: "ses_a", Type: "session.execution.succeeded"}, "idle")
+	// Regression: any event used to mean "running" - opening the session in
+	// the TUI (session.viewed) made an idle sainik look busy.
+	step(opencode.Event{SessionID: "ses_a", Type: "session.viewed"}, "idle")
+	step(opencode.Event{SessionID: "ses_a", Type: "session.usage.updated"}, "idle")
+	step(opencode.Event{SessionID: "ses_a", Type: "session.execution.started"}, "running")
+	step(opencode.Event{SessionID: "ses_a", Type: "session.execution.failed"}, "failed")
+}
 
-	r.Observe(opencode.Event{SessionID: "ses_a", Type: "session.idle"})
-	if inst, _ := r.Get("ses_a"); inst.Status != "idle" {
-		t.Errorf("after session.idle: status=%q, want idle", inst.Status)
+// Regression: a sainik's subagent finishing was reported as the sainik
+// finishing, and flipped its status to idle mid-turn.
+func TestSubagentCompletionIsNotTheSainiksCompletion(t *testing.T) {
+	r := newTestRegistry(t, &fakeParents{parentOf: map[string]string{"ses_child": "ses_a"}})
+	r.Register("ses_a", "")
+	r.Observe(opencode.Event{SessionID: "ses_a", Type: "session.execution.started"})
+
+	done := opencode.Event{SessionID: "ses_child", Type: "session.execution.succeeded"}
+	r.Observe(done)
+	if r.NeedsAttention(done) {
+		t.Error("a subagent finishing must not be reported")
 	}
-
-	r.Observe(opencode.Event{SessionID: "ses_a", Type: "session.text.delta", Severity: opencode.Info})
 	if inst, _ := r.Get("ses_a"); inst.Status != "running" {
-		t.Errorf("after fresh activity: status=%q, want running", inst.Status)
+		t.Errorf("status = %q, want running", inst.Status)
+	}
+
+	asked := opencode.Event{SessionID: "ses_child", Type: "permission.asked", Severity: opencode.Blocking}
+	if !r.NeedsAttention(asked) {
+		t.Error("a subagent waiting on a permission holds up the sainik and must be reported")
+	}
+	if own := (opencode.Event{SessionID: "ses_a", Type: "session.execution.succeeded"}); !r.NeedsAttention(own) {
+		t.Error("the sainik's own completion must be reported")
 	}
 }
 
@@ -219,5 +246,31 @@ func TestInstanceIssueAndForIssue(t *testing.T) {
 	}
 	if got := reg.ForIssue("SEN-3"); len(got) != 0 {
 		t.Errorf("ForIssue(SEN-3) must not match SEN-31: %+v", got)
+	}
+}
+
+func TestExpectedInterruptIsConsumedOnce(t *testing.T) {
+	reg := newTestRegistry(t, &fakeParents{})
+	if reg.TakeExpectedInterrupt("ses_a") {
+		t.Error("nothing was announced")
+	}
+	reg.ExpectInterrupt("ses_a")
+	if !reg.TakeExpectedInterrupt("ses_a") || reg.TakeExpectedInterrupt("ses_a") {
+		t.Error("an announced interrupt must be recognised exactly once")
+	}
+}
+
+func TestNewAndReloadedSainiksStartIdleUntilSeeded(t *testing.T) {
+	r := newTestRegistry(t, &fakeParents{})
+	r.Register("ses_a", "")
+	r.Register("ses_b", "")
+	if inst, _ := r.Get("ses_a"); inst.Status != "idle" {
+		t.Errorf("a just-created session has not been given work yet: %q", inst.Status)
+	}
+	r.SeedRunning(map[string]bool{"ses_b": true})
+	a, _ := r.Get("ses_a")
+	b, _ := r.Get("ses_b")
+	if a.Status != "idle" || b.Status != "running" {
+		t.Errorf("after seeding: a=%q b=%q", a.Status, b.Status)
 	}
 }

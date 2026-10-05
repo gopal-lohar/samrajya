@@ -138,6 +138,22 @@ func (c *Client) SwitchAgent(ctx context.Context, sessionID, agent string) error
 	return c.doJSON(ctx, http.MethodPost, "/api/session/"+sessionID+"/agent", map[string]string{"agent": agent}, nil)
 }
 
+// ActiveSessions returns the IDs of the sessions running right now; a
+// session absent from it is idle.
+func (c *Client) ActiveSessions(ctx context.Context) (map[string]bool, error) {
+	var active map[string]struct {
+		Type string `json:"type"`
+	}
+	if err := c.doJSON(ctx, http.MethodGet, "/api/session/active", nil, &active); err != nil {
+		return nil, err
+	}
+	out := make(map[string]bool, len(active))
+	for id, a := range active {
+		out[id] = a.Type == "running"
+	}
+	return out, nil
+}
+
 // SetPermissions replaces the session's own permission ruleset, which is
 // applied on top of its agent's - how an already-existing session is locked
 // down the same way a newly created one is.
@@ -159,19 +175,18 @@ func (c *Client) ListModels(ctx context.Context) ([]ModelInfo, error) {
 	return models, err
 }
 
-// rawMessage is the wire shape shared by user and assistant message list
-// entries - just enough fields to route to the right typed struct above.
+// rawMessage is the part of a message list entry mahamantri reads. Only
+// fields it uses are declared: entries also carry metadata whose values are
+// objects (e.g. a synthetic message's {"instruction":{"paths":[...]}}), and
+// declaring metadata as strings made every such session unreadable.
 type rawMessage struct {
-	ID       string            `json:"id"`
-	Type     string            `json:"type"`
-	Metadata map[string]string `json:"metadata"`
-	Model    struct {
+	ID    string `json:"id"`
+	Type  string `json:"type"`
+	Model struct {
 		ID         string `json:"id"`
 		ProviderID string `json:"providerID"`
 	} `json:"model"`
 	Tokens TokenUsage `json:"tokens"`
-	Cost   float64    `json:"cost"`
-	Text   string     `json:"text"` // user messages carry their text at the top level
 	Time   struct {
 		Created   int64 `json:"created"`
 		Completed int64 `json:"completed"`
@@ -179,45 +194,70 @@ type rawMessage struct {
 	Content []rawContent `json:"content"`
 }
 
-// rawContent is one part of an assistant message: reasoning, text, or a
-// tool call with its live state.
+// rawContent is one part of an assistant message: text, reasoning or a tool
+// call. Only text is read.
 type rawContent struct {
-	Type  string `json:"type"`
-	Name  string `json:"name"`
-	Text  string `json:"text"`
-	State struct {
-		Status string         `json:"status"`
-		Input  map[string]any `json:"input"`
-	} `json:"state"`
+	Type string `json:"type"`
+	Text string `json:"text"`
 }
 
-// LatestAssistantMessage returns the most recent *completed*
-// assistant-authored message on sessionID, for context-usage rotation
-// checking. A single logical turn produces several assistant message
-// entries (one per agent step - reasoning, tool calls, final reply), and
-// live testing showed the newest one is very often still streaming with
-// zero tokens recorded - skipping incomplete entries (Time.Completed == 0)
-// avoids reading a transient zero as "this session uses no context."
+// recentAssistant is how many of the newest assistant entries are fetched:
+// one turn writes an entry per step, and the newest is often still
+// streaming, so a few are needed to find the last completed one.
+const recentAssistant = 20
+
+// recentAssistantMessages returns the session's newest assistant entries,
+// newest first, using the list endpoint's own type filter and ordering -
+// the list is paginated, so reading "everything" only ever saw one page.
+func (c *Client) recentAssistantMessages(ctx context.Context, sessionID string) ([]rawMessage, error) {
+	var msgs []rawMessage
+	path := fmt.Sprintf("/api/session/%s/message?type=assistant&order=desc&limit=%d", sessionID, recentAssistant)
+	err := c.doJSON(ctx, http.MethodGet, path, nil, &msgs)
+	return msgs, err
+}
+
+// LatestAssistantMessage returns the most recent *completed* assistant
+// entry on sessionID, for context-usage rotation. Entries still streaming
+// carry zero tokens, which would read as "this session uses no context".
 func (c *Client) LatestAssistantMessage(ctx context.Context, sessionID string) (AssistantMessage, bool, error) {
-	msgs, err := c.listMessages(ctx, sessionID)
+	msgs, err := c.recentAssistantMessages(ctx, sessionID)
 	if err != nil {
 		return AssistantMessage{}, false, err
 	}
-	latest, ok := latestByCreatedAt(msgs, func(m rawMessage) bool {
-		return m.Type == "assistant" && m.Time.Completed != 0
-	})
+	latest, ok := latestByCreatedAt(msgs, func(m rawMessage) bool { return m.Time.Completed != 0 })
 	if !ok {
 		return AssistantMessage{}, false, nil
 	}
 	return AssistantMessage{ID: latest.ID, ModelID: latest.Model.ID, ProviderID: latest.Model.ProviderID, Tokens: latest.Tokens, Type: latest.Type}, true, nil
 }
 
+// LastReply returns the text of the newest assistant entry that has any -
+// what a session said at the end of its turn, i.e. its report.
+func (c *Client) LastReply(ctx context.Context, sessionID string) (string, error) {
+	msgs, err := c.recentAssistantMessages(ctx, sessionID)
+	if err != nil {
+		return "", err
+	}
+	latest, ok := latestByCreatedAt(msgs, func(m rawMessage) bool { return replyText(m) != "" })
+	if !ok {
+		return "", nil
+	}
+	return replyText(latest), nil
+}
+
+func replyText(m rawMessage) string {
+	var parts []string
+	for _, c := range m.Content {
+		if c.Type == "text" && strings.TrimSpace(c.Text) != "" {
+			parts = append(parts, strings.TrimSpace(c.Text))
+		}
+	}
+	return strings.Join(parts, "\n\n")
+}
+
 // latestByCreatedAt returns the message matching keep with the largest
-// Time.Created among msgs - found by comparing timestamps directly rather
-// than assuming a particular list order. Live testing against the real
-// server showed GET /api/session/{id}/message returns newest-first, but
-// relying on that ordering (as an earlier version of this function did) is
-// fragile - comparing the timestamp msgs actually carry is not.
+// Time.Created among msgs - comparing the timestamps msgs carry rather than
+// trusting the list's order.
 func latestByCreatedAt(msgs []rawMessage, keep func(rawMessage) bool) (rawMessage, bool) {
 	var latest rawMessage
 	found := false
@@ -231,12 +271,6 @@ func latestByCreatedAt(msgs []rawMessage, keep func(rawMessage) bool) (rawMessag
 		}
 	}
 	return latest, found
-}
-
-func (c *Client) listMessages(ctx context.Context, sessionID string) ([]rawMessage, error) {
-	var msgs []rawMessage
-	err := c.doJSON(ctx, http.MethodGet, "/api/session/"+sessionID+"/message", nil, &msgs)
-	return msgs, err
 }
 
 // doJSON issues one request/response call against the opencode REST API

@@ -189,7 +189,10 @@ func (c *Client) connect(ctx context.Context, lastEventID string, out chan<- Eve
 				raw := []byte(strings.Join(dataLines, "\n"))
 				dataLines = nil
 				env, err := decodeEnvelope(raw)
-				if err == nil {
+				// Streaming deltas are most of the traffic and nothing reads
+				// them; passing them on only crowds out the events that
+				// matter in subscribers' buffers.
+				if err == nil && !strings.HasSuffix(env.Type, ".delta") {
 					select {
 					case out <- classify(env, c.sessions):
 					case <-ctx.Done():
