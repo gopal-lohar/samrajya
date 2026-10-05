@@ -36,8 +36,8 @@ type Config struct {
 		BotName       string `yaml:"botName"`
 		BotHandle     string `yaml:"botHandle"`
 	} `yaml:"linear"`
-	// Attention is mahamantri's local API: sainik operations, the opencode
-	// gateway (with credentials), and the attention API. Loopback only.
+	// Attention is mahamantri's local API: the opencode gateway (with
+	// credentials) and the attention API. Loopback only.
 	Attention struct {
 		ListenAddr   string `yaml:"listenAddr"`
 		RegistryFile string `yaml:"registryFile"`

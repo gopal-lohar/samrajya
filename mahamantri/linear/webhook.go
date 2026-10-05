@@ -26,11 +26,14 @@ type Handler struct {
 	Secret  string
 	Self    Identity
 	Threads *Threads
-	// Sainiks describes the sainik session(s) working on a Linear issue
-	// identifier, or "" for none. Optional.
-	Sainiks func(issue string) string
-	Forward Forwarder
-	Logger  *log.Logger
+	// Sainiks lists the sainik session(s) working on a Linear issue
+	// identifier. Optional.
+	Sainiks func(issue string) []Sainik
+	// Mahamantri is the address Senapati calls, used to spell out the
+	// commands for routing each ping.
+	Mahamantri string
+	Forward    Forwarder
+	Logger     *log.Logger
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -69,11 +72,11 @@ func (h *Handler) handle(eventType string, body []byte) {
 		h.Logger.Printf("linear: not forwarded - %s", why)
 		return
 	}
-	sainiks := ""
+	var sainiks []Sainik
 	if h.Sainiks != nil {
 		sainiks = h.Sainiks(ping.Issue)
 	}
-	if err := h.Forward.Forward(Format(ping, sainiks)); err != nil {
+	if err := h.Forward.Forward(Format(ping, sainiks, h.Mahamantri)); err != nil {
 		h.Logger.Printf("linear: failed to forward ping to senapati: %v", err)
 	}
 }

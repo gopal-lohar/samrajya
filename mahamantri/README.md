@@ -126,24 +126,36 @@ Next to the config file, whatever directory you launch from:
   which thread a reply belongs to but not who wrote that thread, so the
   threads Senapati writes in are remembered as its own comment webhooks
   arrive (`mahamantri-linear-threads.json`).
-- **Sainik operations** (`POST /sainiks`, `POST /sainiks/{id}/message`,
-  `GET /sainiks/{id}/status`): spawning creates the session, registers it
-  and sends the task. A second sainik for an issue that already has one is
-  refused (`409`, naming the existing one) unless `"parallel": true`.
-  Messages take a `delivery`:
-  - `queue` (default): after the sainik's current turn. Verified live: it
-    runs in the same execution, so one completion notice covers both.
-  - `steer`: at its next step.
-  - `interrupt`: stop it now, then send.
 - **opencode gateway** (`/opencode/...`): the whole opencode API, with
-  credentials added and prompts tagged `metadata.source: "senapati"`. It
-  refuses the session-wait endpoint, and any change to Senapati's own
-  session (which is how it could lift its permissions).
+  credentials added. Senapati drives sainiks with it directly (create,
+  prompt, interrupt, read messages, answer permission requests and
+  questions). The gateway adds only what must hold for every call:
+  - `POST /api/session` makes a sainik. The title must be
+    `sainik-<ISSUE>-<slug>`, and a second sainik for an issue is refused
+    (`409`, naming the first) unless `?parallel=true`. Anything the request
+    leaves out is filled in from `sainik.directory`, `sainik.defaultModel`,
+    `sainik.agent`, and permissions that allow everything: a sainik runs
+    unattended, and an "ask" nobody can answer only stalls it. The new
+    session is registered before the response returns.
+  - Prompts are tagged `metadata.source: "senapati"` and default to
+    `delivery: "queue"`, which is delivered after the session's current
+    turn. This was verified live: the queued message runs in the same
+    execution, so one completion notice covers both.
+  - An interrupt is recorded as Senapati's own, so it isn't reported back as
+    a person taking the sainik over.
+  - Deleting a session unregisters it.
+  - Waiting on a session, and changing Senapati's own session, are refused.
+
+  Any other path on mahamantri answers with a list of these calls.
+- **Sainik notices**: a sainik's own turn ending (including its final
+  reply), and a permission request or question anywhere in its session
+  tree (including the exact command to answer it). A subagent finishing is
+  not the sainik finishing. Status (`running`/`idle`/`blocked`/`failed`/
+  `manual`) changes only on lifecycle events, and is seeded at startup from
+  opencode's list of running sessions.
 - **Delivery to Senapati** is one ordered queue (`delivery: queue`, tagged
   `metadata.source: "mahamantri"`): messages arrive in the order received,
   never block the webhook, and are retried while the server is unreachable.
-- **Sainik attention**: blocking events and turn completions on a registered
-  session are forwarded.
 - **Manual takeover**: a message on a registered sainik that wasn't sent by
   mahamantri or Senapati (no `metadata.source` tag), or a `reason:"user"`
   interrupt, marks it `manual` until its turn ends and tells Senapati what the

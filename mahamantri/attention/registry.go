@@ -70,6 +70,22 @@ func (r *Registry) ForIssue(issue string) []Instance {
 	return out
 }
 
+// SeedRunning sets every registered instance's status from the server's own
+// list of running sessions - at startup, when no lifecycle event has been
+// seen yet for any of them. Without it a restart left every sainik "idle"
+// (or, before, "running") until its next turn, whatever it was doing.
+func (r *Registry) SeedRunning(running map[string]bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for id, inst := range r.instances {
+		if running[id] {
+			inst.Status = "running"
+		} else if inst.Status == "running" {
+			inst.Status = "idle"
+		}
+	}
+}
+
 // IsProtected reports whether sessionID is Senapati's own session.
 func (r *Registry) IsProtected(sessionID string) bool {
 	r.mu.Lock()
@@ -83,6 +99,32 @@ type Registry struct {
 	path      string
 	parents   parentLookup
 	protected string
+	// interrupting holds sessions mahamantri is interrupting on Senapati's
+	// behalf: opencode reports every API interrupt as reason "user", so
+	// without this Senapati's own interrupt comes back to it as a person
+	// taking the sainik over.
+	interrupting map[string]time.Time
+}
+
+// ExpectInterrupt records that sessionID is about to be interrupted by
+// Senapati, not a person.
+func (r *Registry) ExpectInterrupt(sessionID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.interrupting == nil {
+		r.interrupting = map[string]time.Time{}
+	}
+	r.interrupting[sessionID] = time.Now()
+}
+
+// TakeExpectedInterrupt reports, once, whether an interrupt of sessionID was
+// Senapati's own (announced within the last minute).
+func (r *Registry) TakeExpectedInterrupt(sessionID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	at, ok := r.interrupting[sessionID]
+	delete(r.interrupting, sessionID)
+	return ok && time.Since(at) < time.Minute
 }
 
 // NewRegistry does not read path itself - call ReloadFromDisk once after
@@ -120,7 +162,7 @@ func (r *Registry) Register(sessionID, label string) (Instance, error) {
 		SessionID:    sessionID,
 		Label:        label,
 		RegisteredAt: time.Now().UTC(),
-		Status:       "running",
+		Status:       "idle",
 	}
 	r.instances[sessionID] = inst
 	if err := r.saveLocked(); err != nil {
@@ -211,15 +253,21 @@ func (r *Registry) Owner(sessionID string) (instanceID string, ok bool) {
 	return "", false
 }
 
-// NeedsAttention reports whether ev is both attention-required and belongs
-// to a registered instance. This is the one filter both the HTTP API and
-// the TUI apply - defined once here so they can't drift apart.
+// NeedsAttention reports whether ev is something Senapati must hear about on
+// a registered instance: a blocking event anywhere in its session tree (a
+// subagent waiting on a permission holds up the sainik), or the end of a
+// turn of the registered session itself. A subagent finishing is not the
+// sainik finishing - forwarding it told Senapati a sainik was done while it
+// was still working.
 func (r *Registry) NeedsAttention(ev opencode.Event) bool {
 	if !Required(ev) {
 		return false
 	}
-	_, owned := r.Owner(ev.SessionID)
-	return owned
+	owner, owned := r.Owner(ev.SessionID)
+	if !owned {
+		return false
+	}
+	return ev.Severity == opencode.Blocking || ev.SessionID == owner
 }
 
 // Observe must see every event (not just attention-required ones) for a
@@ -242,19 +290,26 @@ func (r *Registry) Observe(ev opencode.Event) {
 	evCopy := ev
 	inst.LastEvent = &evCopy
 	inst.LastEventAt = time.Now().UTC()
+	// Status changes only on lifecycle events. Any other event used to mean
+	// "running" - including session.viewed, which fires when a person just
+	// opens the session in the TUI - so idle sainiks were reported busy.
+	self := ev.SessionID == owner
 	switch {
-	case ev.Severity == opencode.Blocking, ev.Type == "session.execution.failed":
-		inst.Status = "blocked"
-		inst.Reason = ev.Type
-	case ev.Type == "session.idle", ev.Type == "session.execution.succeeded", ev.Type == "session.execution.interrupted":
-		inst.Status = "idle"
-		inst.Reason = ""
-	default:
-		// A person-driven turn stays "manual" until it ends (the idle case
-		// above) - ordinary activity events must not erase that.
-		if inst.Status != "manual" {
-			inst.Status = "running"
-			inst.Reason = ""
+	case ev.Severity == opencode.Blocking:
+		inst.Status, inst.Reason = "blocked", ev.Summary
+	case !self:
+		// A subagent's own start/finish says nothing about the sainik's turn.
+	case ev.Type == "session.execution.started":
+		if inst.Status != "manual" { // a person-driven turn stays manual until it ends
+			inst.Status, inst.Reason = "running", ""
+		}
+	case ev.Type == "session.execution.failed":
+		inst.Status, inst.Reason = "failed", ""
+	case completionTypes[ev.Type]:
+		inst.Status, inst.Reason = "idle", ""
+	case ev.Type == "permission.replied", ev.Type == "form.replied":
+		if inst.Status == "blocked" {
+			inst.Status, inst.Reason = "running", ""
 		}
 	}
 }
@@ -319,7 +374,7 @@ func (r *Registry) ReloadFromDisk() error {
 			Label:        inst.Label,
 			Phase:        inst.Phase,
 			RegisteredAt: inst.RegisteredAt,
-			Status:       "running",
+			Status:       "idle",
 		}
 	}
 	return nil

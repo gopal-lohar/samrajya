@@ -17,7 +17,7 @@ var (
 
 func styleForStatus(status string) lipgloss.Style {
 	switch status {
-	case "blocked":
+	case "blocked", "failed":
 		return blockedStyle
 	case "manual":
 		return manualStyle
