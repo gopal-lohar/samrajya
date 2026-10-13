@@ -83,10 +83,11 @@ func setupClaude(ctx context.Context, cfg config.Config, base string, raw chan<-
 	logger.Printf("claude harness: %s", strings.TrimSpace(string(version)))
 
 	cc, err := claudecode.New(claudecode.Options{
-		Binary:    cfg.Claude.Binary,
-		StateFile: cfg.Claude.StateFile,
-		IdleExit:  cfg.Claude.IdleExit,
-		Logger:    logger,
+		Binary:         cfg.Claude.Binary,
+		StateFile:      cfg.Claude.StateFile,
+		IdleExit:       cfg.Claude.IdleExit,
+		ContextWindows: cfg.Claude.ContextWindows,
+		Logger:         logger,
 	}, raw)
 	if err != nil {
 		return backend{}, fmt.Errorf("reading %s: %w (fix or delete it)", cfg.Claude.StateFile, err)

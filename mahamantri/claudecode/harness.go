@@ -61,7 +61,11 @@ type Options struct {
 	StateFile string        // where sessions are remembered across restarts
 	IdleExit  time.Duration // a session's process exits after this long idle; default 10m
 	PollEvery time.Duration // how often takeover is checked; default 5s
-	Logger    *log.Logger
+	// ContextWindows gives the context window of models Claude Code does not
+	// know - it assumes 200k for any model routed through a proxy, e.g.
+	// gpt-6-sol, whose real input limit is 272k.
+	ContextWindows map[string]int
+	Logger         *log.Logger
 }
 
 // Spec is how a session is run. Args carries the permission and tool flags
@@ -114,9 +118,13 @@ type session struct {
 	LastError    string     `json:"lastError,omitempty"`
 	LimitedUntil *time.Time `json:"limitedUntil,omitempty"`
 	BusyAtExit   bool       `json:"busyAtExit,omitempty"`
-	UsedTokens   int        `json:"usedTokens,omitempty"`
-	Context      int        `json:"context,omitempty"`
-	UsedModel    string     `json:"usedModel,omitempty"`
+	// Context use is a live measure from the latest turn, not saved: a
+	// restart measures it again on the next turn rather than trusting a
+	// figure from an older build (one that summed a turn's calls rotated
+	// Senapati on every message).
+	UsedTokens int    `json:"-"`
+	Context    int    `json:"-"`
+	UsedModel  string `json:"-"`
 
 	proc         *proc
 	pending      []string
@@ -124,7 +132,8 @@ type session struct {
 	manual       bool
 	manualPID    int
 	interrupting chan struct{}
-	errCode      string // "error" of the turn's API error message, if any
+	errCode      string     // "error" of the turn's API error message, if any
+	lastCall     tokenUsage // usage of the turn's latest API call
 	lastActive   time.Time
 	limitTimer   *time.Timer
 }
@@ -618,6 +627,14 @@ func (h *Harness) handleLine(s *session, p *proc, line []byte) {
 		if l.Type == "assistant" && l.Error != "" {
 			s.errCode = l.Error
 		}
+		if l.Type == "assistant" {
+			var m struct {
+				Usage *tokenUsage `json:"usage"`
+			}
+			if json.Unmarshal(l.Message, &m) == nil && m.Usage != nil && m.Usage.total() > 0 {
+				s.lastCall = *m.Usage
+			}
+		}
 	case "rate_limit_event":
 		if l.RateLimit != nil {
 			h.recordLimitLocked(provider(s.Spec.Model), l)
@@ -648,13 +665,16 @@ func (h *Harness) recordLimitLocked(prov string, l streamLine) {
 }
 
 func (h *Harness) onResultLocked(s *session, l streamLine) {
-	// The context in use is what the turn's last API call sent and got back.
-	// The result's own totals are summed over every call in the turn - a
-	// turn of ten tool calls would read as ten times the context, and
-	// rotated Senapati after a couple of messages.
-	last := l.Usage.tokenUsage
-	if n := len(l.Usage.Iterations); n > 0 {
-		last = l.Usage.Iterations[n-1]
+	// The context in use is what the turn's last API call sent and got back:
+	// the usage on its last assistant message (verified live for Claude and
+	// for Codex models through a proxy), else the result's last iteration.
+	// Never the result's totals: they are summed over every call in the
+	// turn, so a turn of ten tool calls reads as ten times the context - and
+	// Senapati rotated after every message.
+	last := s.lastCall
+	s.lastCall = tokenUsage{}
+	if last.total() == 0 && len(l.Usage.Iterations) > 0 {
+		last = l.Usage.Iterations[len(l.Usage.Iterations)-1]
 	}
 	if tokens := last.total(); tokens > 0 {
 		s.UsedTokens = tokens
@@ -662,6 +682,9 @@ func (h *Harness) onResultLocked(s *session, l streamLine) {
 			if mu.ContextWindow > 0 && (s.Context == 0 || model == s.Spec.Model || len(l.ModelUsage) == 1) {
 				s.Context, s.UsedModel = mu.ContextWindow, model
 			}
+		}
+		if w := h.opt.ContextWindows[s.UsedModel]; w > 0 {
+			s.Context = w
 		}
 	}
 	errCode := s.errCode

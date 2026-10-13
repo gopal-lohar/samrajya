@@ -52,7 +52,10 @@ senapati:
   # Role text sent to Senapati as its first message (with its identity and the
   # service URLs). Agent-file frontmatter is ignored.
   instructionsFile: "../senapati/senapati.md"
-  rotationThreshold: 0.4     # fraction of the model's context limit that triggers a new Senapati session
+  # Fraction of the model's context window that triggers a fresh Senapati
+  # session. On claude, ~70-95k of every session is fixed (tools, system
+  # prompt, MCP servers) - about a third of 200k - so use 0.75 there.
+  rotationThreshold: 0.4
   # claude harness: when Senapati hits a usage limit, switch it to this model
   # (another provider, e.g. a Codex model) and continue at once.
   fallbackModel: ""
@@ -70,3 +73,7 @@ claude:
   senapatiAllowedTools: []   # added to Senapati's allowlist (curl to mahamantri, jq, mcp__linear)
   senapatiDeniedTools: []    # e.g. [mcp__linear__delete_comment]; a denial wins over any allow
   sainikArgs: []             # extra claude flags for every sainik, e.g. ["--effort", "high"]
+  # Context windows (tokens) of models Claude Code doesn't know - it assumes
+  # 200k for anything routed through a proxy. Used for Senapati's rotation.
+  contextWindows: {}
+  #  gpt-6-sol: 272000

@@ -253,6 +253,7 @@ senapati:
 claude:
   idleExit: 3m
   senapatiDeniedTools: [mcp__linear__delete_comment]
+  contextWindows: {gpt-6-sol: 272000}
 `
 
 // The Claude Code harness needs no opencode server, and names models by id.
@@ -265,7 +266,7 @@ func TestClaudeHarnessConfig(t *testing.T) {
 	dir := filepath.Dir(path)
 	if c.Harness != "claude" || c.Claude.Binary != "claude" || c.Claude.IdleExit != 3*time.Minute || c.Claude.UsageWarnAt != 0.9 ||
 		c.Claude.StateFile != filepath.Join(dir, "mahamantri-claude.json") || c.Senapati.FallbackModel != "gpt-6-sol" ||
-		c.Claude.SenapatiDeniedTools[0] != "mcp__linear__delete_comment" {
+		c.Claude.SenapatiDeniedTools[0] != "mcp__linear__delete_comment" || c.Claude.ContextWindows["gpt-6-sol"] != 272000 {
 		t.Errorf("config = %+v", c.Claude)
 	}
 }

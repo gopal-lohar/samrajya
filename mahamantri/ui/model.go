@@ -162,7 +162,7 @@ func (m Model) View() string {
 
 	if m.selected >= 0 && m.selected < len(m.rows) {
 		b.WriteString("\n")
-		b.WriteString(attachHintStyle.Render("open in opencode:"))
+		b.WriteString(attachHintStyle.Render("open it yourself:"))
 		b.WriteString("\n")
 		b.WriteString(m.attach(m.rows[m.selected].SessionID))
 		b.WriteString("\n")

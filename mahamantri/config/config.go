@@ -70,6 +70,10 @@ type Config struct {
 		SenapatiDeniedTools  []string `yaml:"senapatiDeniedTools"`
 		// SainikArgs are extra claude flags for every sainik.
 		SainikArgs []string `yaml:"sainikArgs"`
+		// ContextWindows gives the context window (tokens) of models Claude
+		// Code does not know: it assumes 200k for any model routed through a
+		// proxy, which makes Senapati rotate too early on, e.g., gpt-6-sol.
+		ContextWindows map[string]int `yaml:"contextWindows"`
 	} `yaml:"claude"`
 	State struct {
 		SenapatiFile string `yaml:"senapatiFile"`

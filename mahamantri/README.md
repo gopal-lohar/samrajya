@@ -154,8 +154,13 @@ starts a new one. Everything below was verified live against Claude Code
 - **Restarts.** Sessions are remembered in `mahamantri-claude.json`. On
   shutdown, running turns are interrupted. On the next start, Senapati is
   told which sainiks were cut off mid-turn so it can prompt them again.
-- **Context use** for Senapati's rotation is measured from the last API call
-  of a turn. The turn's own totals are summed over every call it made.
+- **Context use** for Senapati's rotation is measured from a turn's last API
+  call: the usage on its last assistant message. Its totals are summed over
+  every call in the turn, and for models behind a proxy there is no other
+  breakdown. Claude Code assumes a 200k window for proxied models; set the
+  real one in `claude.contextWindows` (e.g. `gpt-6-sol: 272000`). About
+  70-95k of every session is fixed (tools, system prompt, MCP servers), so
+  use `senapati.rotationThreshold: 0.75` on this harness.
 
 ## The TUI
 

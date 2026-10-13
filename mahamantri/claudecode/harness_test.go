@@ -134,6 +134,16 @@ func fakeClaude(args []string) {
 				}
 			}
 			result("GOT:"+strings.Join(got, "|"), false)
+		case t == "PROXY":
+			// A Codex model through a proxy: per-call usage on each assistant
+			// message, a summed result, and no iterations (captured live).
+			for _, in := range []int{66230, 66446, 66470} {
+				emit(map[string]any{"type": "assistant", "message": map[string]any{"model": model,
+					"usage": map[string]int{"input_tokens": in}, "content": []any{map[string]any{"type": "text", "text": "x"}}}})
+			}
+			emit(map[string]any{"type": "result", "subtype": "success", "is_error": false, "result": "PROXY-OK",
+				"usage":      map[string]any{"input_tokens": 55452, "output_tokens": 83, "cache_read_input_tokens": 109568, "iterations": []any{}},
+				"modelUsage": map[string]any{model: map[string]int{"contextWindow": 200000}}})
 		default:
 			emit(map[string]any{"type": "assistant", "message": map[string]any{"model": model, "content": []any{map[string]any{"type": "text", "text": "ECHO:" + t}}}})
 			emit(map[string]any{"type": "rate_limit_event", "rate_limit_info": map[string]any{"status": "allowed", "resetsAt": 1791471600,
@@ -579,5 +589,36 @@ func TestProviderOfModel(t *testing.T) {
 		if got := provider(model); got != want {
 			t.Errorf("provider(%q) = %q, want %q", model, got, want)
 		}
+	}
+}
+
+// Regression: Senapati on gpt-6-sol rotated after every message - the turn's
+// summed totals (165k) were read as its context (66k), against the 200k
+// Claude Code assumes for proxied models.
+func TestContextIsTheLastCallsUsageAndConfiguredWindowsWin(t *testing.T) {
+	r := newRig(t)
+	r.h.opt.ContextWindows = map[string]int{"gpt-6-sol": 272000}
+	id := r.create(Spec{Title: "t", Model: "gpt-6-sol"})
+	r.h.Prompt(id, "PROXY", "")
+	r.next()
+	tokens, window, model, ok := r.h.Usage(id)
+	if !ok || tokens != 66470 || window != 272000 || model != "gpt-6-sol" {
+		t.Errorf("usage = %d / %d (%s, %v), want 66470 / 272000", tokens, window, model, ok)
+	}
+}
+
+func TestContextUseIsNotCarriedAcrossRestart(t *testing.T) {
+	r := newRig(t)
+	id := r.create(Spec{Title: "t"})
+	r.h.Prompt(id, "one", "")
+	r.next()
+	if _, _, _, ok := r.h.Usage(id); !ok {
+		t.Fatal("measured after a turn")
+	}
+	r.h.Shutdown()
+	h2 := r.open()
+	t.Cleanup(h2.Shutdown)
+	if _, _, _, ok := h2.Usage(id); ok {
+		t.Error("a restarted harness must re-measure, not trust a saved figure")
 	}
 }
