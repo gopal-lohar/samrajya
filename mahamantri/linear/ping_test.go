@@ -10,7 +10,7 @@ import (
 // IDs and payload shapes are from real deliveries in mahamantri.log.
 const (
 	senapatiID   = "11111111-2222-4333-8444-555555555555"
-	personID      = "66666666-7777-4888-9999-000000000000"
+	personID     = "66666666-7777-4888-9999-000000000000"
 	ownCommentID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 )
 
@@ -84,16 +84,16 @@ func TestClassifyDropsEverythingElse(t *testing.T) {
 
 func TestMentionForms(t *testing.T) {
 	for text, want := range map[string]bool{
-		"@senapati-bot":                                     true,
-		"hey @Senapati-Bot, take this":                      true,
-		"thanks @senapati-bot.":                             true,
-		"(@senapati-bot)":                                   true,
+		"@senapati-bot":                                 true,
+		"hey @Senapati-Bot, take this":                  true,
+		"thanks @senapati-bot.":                         true,
+		"(@senapati-bot)":                               true,
 		"https://linear.app/acme/profiles/senapati-bot": true,
-		"@Senapati can you look":                             true,
-		"@senapati-bot.dev":                                 false,
-		"@senapati-bot_bot":                                 false,
-		"email senapati-bot@example.com":                      false,
-		"senapati should do this":                            false,
+		"@Senapati can you look":                        true,
+		"@senapati-bot.dev":                             false,
+		"@senapati-bot_bot":                             false,
+		"email senapati-bot@example.com":                false,
+		"senapati should do this":                       false,
 	} {
 		if got := senapati.mentionedIn(text); got != want {
 			t.Errorf("mentionedIn(%q) = %v, want %v", text, got, want)

@@ -232,10 +232,10 @@ func TestInstanceIssueAndForIssue(t *testing.T) {
 	reg.Register("ses_c", "something else")
 	for label, want := range map[string]string{
 		"sainik-ENG-31-fix-login": "ENG-31",
-		"sainik-eng-32":              "ENG-32",
-		"sainik-ENG-310-x":           "ENG-310",
-		"something else":             "",
-		"sainik-task":                "",
+		"sainik-eng-32":           "ENG-32",
+		"sainik-ENG-310-x":        "ENG-310",
+		"something else":          "",
+		"sainik-task":             "",
 	} {
 		if got := (Instance{Label: label}).Issue(); got != want {
 			t.Errorf("Issue(%q) = %q, want %q", label, got, want)

@@ -1,7 +1,6 @@
 /mahamantri
 mahamantri.yaml
+mahamantri.yaml.*
+!mahamantri.yaml.example
 mahamantri.log
-mahamantri-registry.json
-mahamantri-senapati.json
-mahamantri-linear-threads.json
-mahamantri-claude.json
+mahamantri-*.json
