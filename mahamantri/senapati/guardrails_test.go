@@ -1,6 +1,7 @@
 package senapati
 
 import (
+	"github.com/gopal-lohar/samrajya/mahamantri/brain"
 	"regexp"
 	"strings"
 	"testing"
@@ -128,5 +129,17 @@ func TestSainikRole(t *testing.T) {
 	}
 	if strings.Contains(SainikRole(""), "workspace") {
 		t.Error("no workspace configured: no confinement text")
+	}
+}
+
+func TestProjectNotes(t *testing.T) {
+	got := ProjectNotes("app", []brain.Note{{Description: "Tests", Body: "Run make check.\nNot npm test."}})
+	for _, want := range []string{"learned about the app project", "- Tests:\n  Run make check.\n  Not npm test.", "out of date, say so"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in %q", want, got)
+		}
+	}
+	if ProjectNotes("", []brain.Note{{Body: "x"}}) != "" || ProjectNotes("app", nil) != "" {
+		t.Error("nothing to add: nothing added")
 	}
 }

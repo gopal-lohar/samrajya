@@ -314,3 +314,14 @@ func writeConfigAt(t *testing.T, path, contents string) string {
 	}
 	return path
 }
+
+func TestProjectOf(t *testing.T) {
+	for dir, want := range map[string]string{"/srv/ws/app": "app", "/srv/ws/app/sub/x": "app", "/srv/ws": "", "/srv/other": "", "/srv/wsx/app": ""} {
+		if got := ProjectOf("/srv/ws", dir); got != want {
+			t.Errorf("ProjectOf(%s) = %q, want %q", dir, got, want)
+		}
+	}
+	if ProjectOf("", "/srv/ws/app") != "" {
+		t.Error("no workspace: no project")
+	}
+}

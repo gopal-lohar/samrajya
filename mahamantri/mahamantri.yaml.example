@@ -5,6 +5,17 @@
 # Claude subscription and whatever your Claude Code setup routes to) or
 # "opencode" (an already-running `opencode serve`, configured below).
 harness: opencode
+# The directory holding the projects this system works on, one directory per
+# project (e.g. ../repos, which git ignores). Sainiks start in a project there,
+# are refused a directory outside it, and are told to stay inside it and to
+# follow each project's own AGENTS.md / CLAUDE.md. Empty: no limit.
+workspace: ""
+# Samrajya's memory of the work (e.g. ../brain, which git ignores): short notes
+# Senapati keeps on standing instructions, facts outside code and Linear, and
+# recurring problems. Shown in Senapati's briefing; a project's notes go to every
+# sainik started in that project. Plain markdown - read or edit it by hand.
+# Empty: no memory.
+brain: ""
 opencode:
   serverURL: http://localhost:4096
   # `opencode serve` picks a NEW password every start. Either paste the current

@@ -32,7 +32,10 @@ type Config struct {
 	// one directory per project (e.g. ../repos). Sainiks are told to work
 	// only inside it, and cannot be started outside it. Empty: no limit.
 	Workspace string `yaml:"workspace"`
-	Opencode  struct {
+	// Brain is the directory holding Samrajya's memory of the work (see
+	// package brain), e.g. ../brain. Empty: no memory.
+	Brain    string `yaml:"brain"`
+	Opencode struct {
 		ServerURL string `yaml:"serverURL"`
 		Password  string `yaml:"password"`
 	} `yaml:"opencode"`
@@ -175,7 +178,7 @@ func (c *Config) applyEnvFallbacks() {
 }
 
 func (c *Config) resolvePaths() {
-	for _, p := range []*string{&c.Attention.RegistryFile, &c.State.SenapatiFile, &c.State.LinearThreadsFile, &c.Senapati.InstructionsFile, &c.Claude.StateFile, &c.Workspace, &c.Sainik.Directory} {
+	for _, p := range []*string{&c.Attention.RegistryFile, &c.State.SenapatiFile, &c.State.LinearThreadsFile, &c.Senapati.InstructionsFile, &c.Claude.StateFile, &c.Workspace, &c.Sainik.Directory, &c.Brain} {
 		if *p != "" && !filepath.IsAbs(*p) {
 			*p = filepath.Join(c.Dir, *p)
 		}
@@ -251,6 +254,20 @@ func (c Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+// ProjectOf is the workspace project dir belongs to - the first directory
+// below the workspace - or "" if dir is the workspace itself or outside it.
+func ProjectOf(workspace, dir string) string {
+	if workspace == "" || !Within(workspace, dir) {
+		return ""
+	}
+	rel, _ := filepath.Rel(filepath.Clean(workspace), filepath.Clean(dir))
+	if rel == "." {
+		return ""
+	}
+	first, _, _ := strings.Cut(filepath.ToSlash(rel), "/")
+	return first
 }
 
 // Within reports whether path is dir or inside it.

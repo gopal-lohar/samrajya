@@ -2,6 +2,7 @@ package senapati
 
 import (
 	"fmt"
+	"github.com/gopal-lohar/samrajya/mahamantri/brain"
 	"strings"
 
 	"github.com/gopal-lohar/samrajya/mahamantri/opencode"
@@ -117,5 +118,20 @@ func SainikRole(workspace string) string {
 		"files go, how to claim a working copy, which ports and services to use, what you must not do.\n\n" +
 		"End every turn with a short report: what you did, where (paths, branches), what is left, and any decision you need. " +
 		"If you need a decision to go on, ask it in that report and end your turn - nobody answers questions mid-turn.")
+	return b.String()
+}
+
+// ProjectNotes renders the brain's notes for a sainik's project, appended to
+// its standing rules so they reach it whatever Senapati writes in its task.
+func ProjectNotes(project string, notes []brain.Note) string {
+	if project == "" || len(notes) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n\nWhat Samrajya has learned about the %s project, from earlier work - take it into account:\n", project)
+	for _, n := range notes {
+		fmt.Fprintf(&b, "\n- %s:\n  %s\n", n.Description, strings.ReplaceAll(strings.TrimSpace(n.Body), "\n", "\n  "))
+	}
+	b.WriteString("\nIf any of this turns out to be wrong or out of date, say so in your report.")
 	return b.String()
 }

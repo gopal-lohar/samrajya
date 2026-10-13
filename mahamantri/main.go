@@ -19,6 +19,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/gopal-lohar/samrajya/mahamantri/attention"
+	"github.com/gopal-lohar/samrajya/mahamantri/brain"
 	"github.com/gopal-lohar/samrajya/mahamantri/config"
 	"github.com/gopal-lohar/samrajya/mahamantri/harness"
 	"github.com/gopal-lohar/samrajya/mahamantri/linear"
@@ -84,8 +85,22 @@ func run(configPath string) error {
 	cmds := harness.For(cfg.Harness, base)
 	raw := make(chan opencode.Event, 64)
 
-	// The standing rules every sainik works under.
-	sainikRole := func(string) string { return senapati.SainikRole(cfg.Workspace) }
+	// Samrajya's memory of the work: summarised in Senapati's briefing, and
+	// a project's notes given to every sainik started in that project.
+	var mem *brain.Store
+	if cfg.Brain != "" {
+		if mem, err = brain.Open(cfg.Brain, func() []string { return projects(cfg.Workspace) }); err != nil {
+			return fmt.Errorf("brain %s: %w", cfg.Brain, err)
+		}
+	}
+	sainikRole := func(dir string) string {
+		role := senapati.SainikRole(cfg.Workspace)
+		if mem != nil {
+			project := config.ProjectOf(cfg.Workspace, dir)
+			role += senapati.ProjectNotes(project, mem.ForProject(project))
+		}
+		return role
+	}
 
 	// Everything that can fail on startup fails here, before a Senapati
 	// session is created and before the TUI takes over the screen, with a
@@ -151,6 +166,8 @@ func run(configPath string) error {
 			Harness:       cfg.Harness,
 			Workspace:     cfg.Workspace,
 			Projects:      projects(cfg.Workspace),
+			Memory:        mem != nil,
+			MemoryIndex:   memIndex(mem),
 			DefaultModel:  cfg.Sainik.DefaultModel,
 			Models:        models,
 			Instructions:  instructions,
@@ -227,6 +244,9 @@ func run(configPath string) error {
 	mux := http.NewServeMux()
 	attention.Routes(mux, reg, bcast, be.lookup)
 	be.routes(mux, reg)
+	if mem != nil {
+		brain.Routes(mux, mem)
+	}
 	attnSrv := &http.Server{Handler: mux}
 	linearSrv := &http.Server{Handler: &linear.Handler{
 		Secret:   cfg.Linear.SigningSecret,
@@ -281,6 +301,13 @@ func run(configPath string) error {
 	attnSrv.Shutdown(shutdownCtx)
 	linearSrv.Shutdown(shutdownCtx)
 	return tuiErr
+}
+
+func memIndex(mem *brain.Store) string {
+	if mem == nil {
+		return ""
+	}
+	return mem.Index()
 }
 
 // projects lists the project directories in the workspace.

@@ -113,6 +113,30 @@ belongs in this repository.
   point outside it: lock files, notes or git hooks naming absolute paths of
   another copy will send agents there.
 
+## Memory (the brain)
+
+`brain:` names the directory holding Samrajya's memory of the work. In this
+repo that's `brain/`, which git ignores. It holds short notes worth knowing
+next time, kept by Senapati: a person's standing instructions, facts that are
+in neither the code nor Linear, and problems that keep coming back. It isn't
+meant to hold everything.
+
+- **Format.** Each note is a markdown file, `brain/<name>.md`, with a
+  one-line `description`, an optional `project` (a workspace project), and a
+  body. `brain/INDEX.md` is rewritten on every change. You can read, edit or
+  delete notes by hand; a file without the header still counts, and its first
+  line becomes the description.
+- **Kept small.** Notes stay under 1,500 bytes and there are at most 50. At
+  the cap, a new note is refused until Senapati merges or deletes old ones.
+  `senapati.md` says what is worth a note and what isn't.
+- **Senapati** keeps it through `GET/PUT/DELETE /brain/<name>` and
+  `GET /brain`. The index is in its briefing, so memory survives rotations
+  and restarts. You can also tell it on Linear to remember or forget
+  something.
+- **Sainiks** started in a project get that project's notes appended to their
+  standing rules automatically, with no need for Senapati to pass them on.
+  A note's `project` must be one of the workspace's projects.
+
 ## The Claude Code harness
 
 Claude Code has no server, so mahamantri runs it. A session is a transcript

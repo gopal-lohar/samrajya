@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/gopal-lohar/samrajya/mahamantri/brain"
 	"github.com/gopal-lohar/samrajya/mahamantri/harness"
 )
 
@@ -25,8 +26,12 @@ type BriefingInfo struct {
 	// Workspace is the directory holding the projects, and Projects the
 	// directories in it - read when the briefing is built, so they are never
 	// part of this program.
-	Workspace    string
-	Projects     []string
+	Workspace string
+	Projects  []string
+	// Memory is whether the brain is on; MemoryIndex its notes, one line
+	// each, as they are when the briefing is built.
+	Memory       bool
+	MemoryIndex  string
 	DefaultModel string        // used when a spawn names no model
 	Models       []ModelChoice // what it may pick from, with guidance
 	Instructions string
@@ -113,6 +118,23 @@ func Briefing(i BriefingInfo) string {
 			"sainik standing rules: stay inside the workspace, never touch copies of these projects elsewhere on the machine, "+
 			"follow the project's own AGENTS.md / CLAUDE.md, never write to Linear. You don't need to repeat those; do name the "+
 			"project in the task. If you can't tell which project an issue is about, ask on the issue.\n\n", dirField)
+	}
+
+	if i.Memory && i.MahamantriURL != "" {
+		b.WriteString("Your memory (Samrajya's brain) - what earlier work taught that is worth knowing now; see " +
+			"\"Memory\" in your instructions for what belongs there. Notes for a project reach every sainik started in " +
+			"that project by themselves; pass a general note on in a task when it matters there.\n")
+		if strings.TrimSpace(i.MemoryIndex) == "" {
+			b.WriteString("(no notes yet)\n")
+		} else {
+			b.WriteString(i.MemoryIndex)
+		}
+		fmt.Fprintf(&b, "Commands (at most %d notes, each under %d bytes; the -d body follows the same quoting rule as your other commands):\n"+
+			"  curl -s %[3]s/brain/<name>                     read a note\n"+
+			"  curl -s -X PUT %[3]s/brain/<name> -H 'Content-Type: application/json' -d '{\"description\":\"<one line>\",\"project\":\"<project, or omit for everywhere>\",\"body\":\"<the note>\"}'   add or replace a note\n"+
+			"  curl -s -X DELETE %[3]s/brain/<name>           forget a note\n"+
+			"  curl -s %[3]s/brain                            list notes\n\n",
+			brain.MaxNotes, brain.MaxBody, i.MahamantriURL)
 	}
 
 	if len(i.Models) > 0 || i.DefaultModel != "" {

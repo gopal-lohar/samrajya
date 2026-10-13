@@ -146,3 +146,30 @@ func TestBriefingNamesTheWorkspaceAndItsProjects(t *testing.T) {
 		t.Error("no workspace configured: no workspace section")
 	}
 }
+
+func TestBriefingCarriesMemory(t *testing.T) {
+	got := Briefing(BriefingInfo{MahamantriURL: "http://127.0.0.1:4097", Memory: true,
+		MemoryIndex: "- ask-before-push (everywhere): Ask before pushing\n"})
+	for _, want := range []string{"Your memory (Samrajya's brain)", "- ask-before-push (everywhere): Ask before pushing",
+		"curl -s -X PUT http://127.0.0.1:4097/brain/<name>", "curl -s -X DELETE http://127.0.0.1:4097/brain/<name>",
+		"at most 50 notes", "reach every sainik started in that project"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+	if !strings.Contains(Briefing(BriefingInfo{MahamantriURL: "x", Memory: true}), "(no notes yet)") {
+		t.Error("an empty memory says so")
+	}
+	if strings.Contains(Briefing(BriefingInfo{MahamantriURL: "x"}), "/brain") {
+		t.Error("memory off: no memory section")
+	}
+}
+
+func TestShippedInstructionsSayWhatToRemember(t *testing.T) {
+	text, _ := LoadInstructions("../../senapati/senapati.md")
+	for _, want := range []string{"## Memory", "Worth a note", "Not worth a note", "Update an existing note", "asks you to forget"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("senapati.md missing %q", want)
+		}
+	}
+}
