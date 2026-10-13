@@ -120,23 +120,10 @@ func (g *gateway) createSainik(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	title, _ := body["title"].(string)
-	m := sainikTitle.FindStringSubmatch(title)
-	if m == nil {
-		attention.WriteError(w, http.StatusBadRequest, fmt.Sprintf("title %q: a sainik's title must be sainik-<ISSUE>-<slug>, "+
-			"e.g. \"sainik-ENG-33-fix-login\" (lowercase slug) - it is how Linear pings about the issue find it", title))
+	if !checkSainik(w, r, g.reg, title) {
 		return
 	}
-	issue := strings.ToUpper(m[1])
 	q := r.URL.Query()
-	if existing := g.reg.ForIssue(issue); len(existing) > 0 && q.Get("parallel") != "true" {
-		inst := existing[0]
-		attention.WriteJSON(w, http.StatusConflict, map[string]string{
-			"error": fmt.Sprintf("%s already has a sainik: %q (session %s). Prompt that session instead of starting another; "+
-				"add ?parallel=true only if the issue splits into independent parts.", issue, inst.Label, inst.SessionID),
-			"sessionID": inst.SessionID,
-		})
-		return
-	}
 	q.Del("parallel")
 	r.URL.RawQuery = q.Encode()
 
@@ -170,6 +157,29 @@ func (g *gateway) createSainik(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	rec.copyTo(w)
+}
+
+// checkSainik enforces what holds for every sainik on any harness: its title
+// names its issue (sainik-<ISSUE>-<slug>), and an issue has one sainik unless
+// the request says ?parallel=true. It answers the request itself if not.
+func checkSainik(w http.ResponseWriter, r *http.Request, reg Registrar, title string) bool {
+	m := sainikTitle.FindStringSubmatch(title)
+	if m == nil {
+		attention.WriteError(w, http.StatusBadRequest, fmt.Sprintf("title %q: a sainik's title must be sainik-<ISSUE>-<slug>, "+
+			"e.g. \"sainik-ENG-33-fix-login\" (lowercase slug) - it is how Linear pings about the issue find it", title))
+		return false
+	}
+	issue := strings.ToUpper(m[1])
+	if existing := reg.ForIssue(issue); len(existing) > 0 && r.URL.Query().Get("parallel") != "true" {
+		inst := existing[0]
+		attention.WriteJSON(w, http.StatusConflict, map[string]string{
+			"error": fmt.Sprintf("%s already has a sainik: %q (session %s). Prompt that session instead of starting another; "+
+				"add ?parallel=true only if the issue splits into independent parts.", issue, inst.Label, inst.SessionID),
+			"sessionID": inst.SessionID,
+		})
+		return false
+	}
+	return true
 }
 
 // tagPrompt stamps metadata.source = "senapati" on a prompt, which keeps

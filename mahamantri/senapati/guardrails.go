@@ -56,3 +56,28 @@ func Permissions(mahamantriURL string, extra []opencode.PermissionRule) []openco
 func SainikPermissions() []opencode.PermissionRule {
 	return []opencode.PermissionRule{{Action: "*", Resource: "*", Effect: "allow"}}
 }
+
+// ClaudeSenapatiArgs are the flags every Senapati process runs with on the
+// Claude Code harness - the same lockdown as Permissions, in Claude Code's
+// terms (verified live): only the Bash tool exists, "dontAsk" denies
+// anything not allowed instead of asking, and what is allowed is curl to
+// mahamantri, jq, and the Linear MCP server's tools. allowed and denied come
+// from claude.senapatiAllowedTools / senapatiDeniedTools; a denial wins over
+// any allow.
+func ClaudeSenapatiArgs(mahamantriURL string, allowed, denied []string) []string {
+	base := strings.TrimRight(mahamantriURL, "/")
+	args := []string{"--permission-mode", "dontAsk", "--tools", "Bash",
+		"--allowedTools", "Bash(curl * " + base + "/*)", "Bash(curl " + base + "/*)", "Bash(jq *)", "mcp__linear"}
+	args = append(args, allowed...)
+	args = append(args, "--disallowedTools", "AskUserQuestion")
+	return append(args, denied...)
+}
+
+// ClaudeSainikArgs are the flags every sainik process runs with on the Claude
+// Code harness: nothing is ever asked - a sainik runs unattended, so a prompt
+// nobody answers only stalls it - and it cannot ask questions mid-turn; one
+// that needs a decision ends its turn and asks in its reply, which reaches
+// Senapati in the finished notice. extra comes from claude.sainikArgs.
+func ClaudeSainikArgs(extra []string) []string {
+	return append([]string{"--dangerously-skip-permissions", "--disallowedTools", "AskUserQuestion"}, extra...)
+}

@@ -303,8 +303,12 @@ func (r *Registry) Observe(ev opencode.Event) {
 		if inst.Status != "manual" { // a person-driven turn stays manual until it ends
 			inst.Status, inst.Reason = "running", ""
 		}
+	case ev.Type == "session.execution.failed" && strings.Contains(string(ev.Raw), `"error":"rate_limit"`):
+		inst.Status, inst.Reason = "limited", ev.Summary // claude harness: paused until the limit resets
 	case ev.Type == "session.execution.failed":
 		inst.Status, inst.Reason = "failed", ""
+	case ev.Type == "session.manual.ended":
+		inst.Status, inst.Reason = "idle", ""
 	case completionTypes[ev.Type]:
 		inst.Status, inst.Reason = "idle", ""
 	case ev.Type == "permission.replied", ev.Type == "form.replied":

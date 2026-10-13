@@ -3,6 +3,7 @@ package linear
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/gopal-lohar/samrajya/mahamantri/harness"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -181,10 +182,10 @@ type Sainik struct {
 // Format is the message Senapati receives for p. It is worded as what it is -
 // a notification that the issue has news, to be handled against the issue as
 // a whole - because a bare comment pasted into Senapati reads like a person
-// chatting with it. It ends with the exact commands for routing it, against
-// mahamantri at mahamantriURL: left to work out the API itself, Senapati
-// probed for endpoints that don't exist and gave up.
-func Format(p Ping, sainiks []Sainik, mahamantriURL string) string {
+// chatting with it. It ends with the exact commands for routing it on the
+// harness in use (none if cmds is nil): left to work out the API itself,
+// Senapati probed for endpoints that don't exist and gave up.
+func Format(p Ping, sainiks []Sainik, cmds harness.Commands) string {
 	var b strings.Builder
 	what := "mentioned you in a comment"
 	if p.Kind == "reply" {
@@ -215,20 +216,15 @@ func Format(p Ping, sainiks []Sainik, mahamantriURL string) string {
 		"interrupt only if it is), to a new sainik if there is none and work is asked for, or answer on Linear yourself "+
 		"if no work is needed. Do not investigate it yourself, and do not wait for anything: end your turn once it is routed.\n", p.Issue)
 
-	if mahamantriURL != "" {
+	if cmds != nil {
 		b.WriteString("\nCommands (fill in the <...> parts; run them exactly like this - plain curl, optionally piped to jq):\n")
-		api := mahamantriURL + "/opencode/api/session"
 		if len(sainiks) == 0 {
-			fmt.Fprintf(&b, "Start its sainik - create the session, then send it the task:\n"+
-				"  curl -s -X POST %s -H 'Content-Type: application/json' -d '{\"title\":\"sainik-%s-<short-name>\"}' | jq -r .data.id\n"+
-				"  curl -s -X POST %s/<id>/prompt -H 'Content-Type: application/json' -d '{\"text\":\"<self-contained task; tell it to read %s on Linear itself>\"}'\n",
-				api, p.Issue, api, p.Issue)
+			fmt.Fprintf(&b, "Start its sainik with its task:\n%s\n", cmds.Start(p.Issue))
 		} else {
 			id := sainiks[0].SessionID
-			fmt.Fprintf(&b, "Send its sainik what is new (queued: it gets it after its current turn):\n"+
-				"  curl -s -X POST %s/%s/prompt -H 'Content-Type: application/json' -d '{\"text\":\"<what is new>\"}'\n", api, id)
-			fmt.Fprintf(&b, "Only if this cannot wait, stop it first:\n  curl -s -X POST %s/%s/interrupt\n", api, id)
-			fmt.Fprintf(&b, "Is it running right now (absent = idle):\n  curl -s %s/active | jq '.data[\"%s\"]'\n", api, id)
+			fmt.Fprintf(&b, "Send its sainik what is new (queued: it gets it after its current turn):\n%s\n", cmds.Prompt(id))
+			fmt.Fprintf(&b, "Only if this cannot wait, stop it first:\n%s\n", cmds.Interrupt(id))
+			fmt.Fprintf(&b, "Is it running right now:\n%s\n", cmds.Running(id))
 		}
 	}
 	return b.String()

@@ -68,17 +68,16 @@ func TestShippedInstructionsCoverPingsAndDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"## Handling a Linear ping", "## Handling a sainik notice", "It never means Mahamantri",
-		"tools.linear.get_issue", "from inside the `execute` tool",
-		`"delivery": "queue"`, "$MAHAMANTRI/opencode/api/session/<id>/interrupt", "$MAHAMANTRI/opencode/api/session -H",
-		"sainik-<ISSUE>-<slug>", `\u0027`,
+		"## Handling a Linear ping", "## Handling a sainik notice", `"delivery": "queue"`,
+		`"Your
+tools" section of your briefing`,
 		"Never wait",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("senapati.md is missing %q", want)
 		}
 	}
-	for _, banned := range []string{"OPENCODE_SERVER_PASSWORD", "sleep ", "$MAHAMANTRI/sainiks", "/status"} {
+	for _, banned := range []string{"OPENCODE_SERVER_PASSWORD", "sleep ", "$MAHAMANTRI/sainiks", "/status", "/opencode/api", "`execute`"} {
 		if strings.Contains(text, banned) {
 			t.Errorf("senapati.md must not mention %q", banned)
 		}
@@ -113,5 +112,22 @@ func TestLoadInstructionsFailsLoudlyForAMissingFile(t *testing.T) {
 	}
 	if got, err := LoadInstructions(""); err != nil || got != "" {
 		t.Errorf("empty path = %q, %v, want no instructions and no error", got, err)
+	}
+}
+
+// The harness decides what a sainik is and how Linear is reached; the
+// briefing must say the right one.
+func TestBriefingOnClaudeDescribesClaudeTools(t *testing.T) {
+	got := Briefing(BriefingInfo{MahamantriURL: "http://127.0.0.1:4097", Harness: "claude", Instructions: "x"})
+	for _, want := range []string{"one separate Claude Code session per issue", "mcp__linear__get_issue",
+		"curl -s -X POST http://127.0.0.1:4097/claude/session -H", "## Your tools"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+	for _, banned := range []string{"execute", "/opencode/api", "opencode password"} {
+		if strings.Contains(got, banned) {
+			t.Errorf("claude briefing mentions %q", banned)
+		}
 	}
 }

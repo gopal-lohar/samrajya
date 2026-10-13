@@ -3,6 +3,7 @@ package linear
 import (
 	"bytes"
 	"encoding/json"
+	"github.com/gopal-lohar/samrajya/mahamantri/harness"
 	"io"
 	"log"
 	"net/http"
@@ -29,11 +30,11 @@ type Handler struct {
 	// Sainiks lists the sainik session(s) working on a Linear issue
 	// identifier. Optional.
 	Sainiks func(issue string) []Sainik
-	// Mahamantri is the address Senapati calls, used to spell out the
-	// commands for routing each ping.
-	Mahamantri string
-	Forward    Forwarder
-	Logger     *log.Logger
+	// Commands spells out, for the harness in use, the commands for routing
+	// each ping.
+	Commands harness.Commands
+	Forward  Forwarder
+	Logger   *log.Logger
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -76,7 +77,7 @@ func (h *Handler) handle(eventType string, body []byte) {
 	if h.Sainiks != nil {
 		sainiks = h.Sainiks(ping.Issue)
 	}
-	if err := h.Forward.Forward(Format(ping, sainiks, h.Mahamantri)); err != nil {
+	if err := h.Forward.Forward(Format(ping, sainiks, h.Commands)); err != nil {
 		h.Logger.Printf("linear: failed to forward ping to senapati: %v", err)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -80,6 +81,9 @@ func (m *Manager) SetBriefing(build func() (string, error)) { m.briefing = build
 // actually used, or "" before it has answered anything.
 func (m *Manager) Model() string {
 	if md := m.baseReq.Model; md != nil {
+		if md.ProviderID == "" { // Claude Code: models are named by id alone
+			return md.ID
+		}
 		return md.ProviderID + "/" + md.ID
 	}
 	m.mu.RLock()
@@ -333,7 +337,7 @@ func (m *Manager) usageFraction(ctx context.Context, sessionID string) (float64,
 		return 0, err
 	}
 	m.mu.Lock()
-	m.observed = asst.ProviderID + "/" + asst.ModelID
+	m.observed = strings.TrimPrefix(asst.ProviderID+"/"+asst.ModelID, "/")
 	m.mu.Unlock()
 	models, err := m.client.ListModels(ctx)
 	if err != nil {

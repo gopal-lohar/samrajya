@@ -274,3 +274,23 @@ func TestNewAndReloadedSainiksStartIdleUntilSeeded(t *testing.T) {
 		t.Errorf("after seeding: a=%q b=%q", a.Status, b.Status)
 	}
 }
+
+// Claude harness: a usage-limit pause, and a person handing a session back.
+func TestClaudeHarnessStatuses(t *testing.T) {
+	r := newTestRegistry(t, &fakeParents{})
+	r.Register("u-1", "")
+	r.Observe(opencode.Event{SessionID: "u-1", Type: "session.execution.started"})
+	r.Observe(opencode.Event{SessionID: "u-1", Type: "session.execution.failed", Summary: "usage limit: resets 2pm", Raw: []byte(`{"error":"rate_limit","limitedUntil":"x"}`)})
+	if inst, _ := r.Get("u-1"); inst.Status != "limited" {
+		t.Errorf("status = %q, want limited", inst.Status)
+	}
+	r.MarkManual("u-1", "a person opened it")
+	ended := opencode.Event{SessionID: "u-1", Type: "session.manual.ended"}
+	r.Observe(ended)
+	if inst, _ := r.Get("u-1"); inst.Status != "idle" {
+		t.Errorf("status = %q, want idle", inst.Status)
+	}
+	if !r.NeedsAttention(ended) {
+		t.Error("Senapati must hear that a person handed the sainik back")
+	}
+}

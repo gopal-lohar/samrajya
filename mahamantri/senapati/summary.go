@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/gopal-lohar/samrajya/mahamantri/attention"
+	"github.com/gopal-lohar/samrajya/mahamantri/harness"
 	"github.com/gopal-lohar/samrajya/mahamantri/linear"
 	"github.com/gopal-lohar/samrajya/mahamantri/opencode"
 )
@@ -21,22 +23,34 @@ func label(inst attention.Instance) string {
 // SummarizeEvent formats an attention-required event on a registered sainik
 // for Senapati. reply is the sainik's final reply when the event ends its
 // turn ("" if unknown), so Senapati has its report without another call.
-// Every notice ends with the exact commands for what it calls for, against
-// mahamantri at base - Senapati left to work out the API improvised and
-// stalled.
-func SummarizeEvent(ev opencode.Event, inst attention.Instance, reply, base string) string {
+// Every notice ends with the exact commands for what it calls for, on the
+// harness in use - Senapati left to work out the API improvised and stalled.
+func SummarizeEvent(ev opencode.Event, inst attention.Instance, reply string, cmds harness.Commands) string {
+	base := cmds.Base()
 	var b strings.Builder
 	fmt.Fprintf(&b, "[Sainik notice] %q (session %s)", label(inst), inst.SessionID)
 	if inst.Phase != "" {
 		fmt.Fprintf(&b, ", phase %q,", inst.Phase)
 	}
-	lastReply := fmt.Sprintf("curl -s '%s/opencode/api/session/%s/message?type=assistant&order=desc&limit=1' | jq -r '.data[0].content[] | select(.type==\"text\") | .text'", base, inst.SessionID)
+	lastReply := cmds.LastReply(inst.SessionID)
 
 	switch {
 	case ev.Type == "session.execution.succeeded" || ev.Type == "session.idle":
 		b.WriteString(" finished its turn and is idle.\n")
 		writeReply(&b, reply, lastReply)
 		b.WriteString("\nDo the issue's next step: post the result on Linear, prompt it with its next task, or close it out.")
+	case ev.Type == "session.execution.failed" && limitedUntil(ev) != "":
+		fmt.Fprintf(&b, " hit a usage limit and is paused until %s; Mahamantri resumes it then by itself, "+
+			"and holds anything you send it meanwhile.\n", limitedUntil(ev))
+		writeReply(&b, reply, lastReply)
+		fmt.Fprintf(&b, "\nNothing to do unless it cannot wait. To continue now on another provider's model "+
+			"(it keeps its whole conversation), switch it, then prompt it to continue:\n"+
+			"  curl -s -X POST %s/claude/session/%s/model -H 'Content-Type: application/json' -d '{\"model\":\"<model id>\"}'\n%s",
+			base, inst.SessionID, cmds.Prompt(inst.SessionID))
+	case ev.Type == "session.manual.ended":
+		b.WriteString(" is yours again: the person who opened it has closed it. Anything you queued for it meanwhile runs now.\n")
+		writeReply(&b, reply, lastReply)
+		b.WriteString("\nThey may have changed things in it - read its reply above before deciding the next step.")
 	case ev.Type == "session.execution.failed":
 		b.WriteString(" failed - its turn ended with an error.\n")
 		writeReply(&b, reply, lastReply)
@@ -95,6 +109,19 @@ func SummarizeEvent(ev opencode.Event, inst attention.Instance, reply, base stri
 		fmt.Fprintf(&b, " needs attention: %s", ev.Summary)
 	}
 	return b.String()
+}
+
+// limitedUntil is when a usage-limit pause ends, from a claude harness
+// event, or "" if ev is not one.
+func limitedUntil(ev opencode.Event) string {
+	var raw struct {
+		Error string    `json:"error"`
+		Until time.Time `json:"limitedUntil"`
+	}
+	if json.Unmarshal(ev.Raw, &raw) != nil || raw.Error != "rate_limit" || raw.Until.IsZero() {
+		return ""
+	}
+	return raw.Until.UTC().Format("15:04 UTC on Jan 2")
 }
 
 func writeReply(b *strings.Builder, reply, command string) {

@@ -25,6 +25,9 @@ type ModelPolicy struct {
 }
 
 type Config struct {
+	// Harness is what sessions run on: "opencode" (an opencode server) or
+	// "claude" (Claude Code, run by mahamantri). Empty means opencode.
+	Harness  string `yaml:"harness"`
 	Opencode struct {
 		ServerURL string `yaml:"serverURL"`
 		Password  string `yaml:"password"`
@@ -48,7 +51,27 @@ type Config struct {
 		Agent        string `yaml:"agent"`
 	} `yaml:"sainik"`
 	Models []ModelPolicy `yaml:"models"`
-	State  struct {
+	// Claude configures the Claude Code harness (harness: claude).
+	Claude struct {
+		Binary string `yaml:"binary"` // default "claude"
+		// StateFile remembers the Claude Code sessions mahamantri runs.
+		// Defaults to mahamantri-claude.json next to the config.
+		StateFile string `yaml:"stateFile"`
+		// IdleExit is how long a session's process stays up with nothing to
+		// do before it exits; the next message resumes it. Default 10m.
+		IdleExit time.Duration `yaml:"idleExit"`
+		// UsageWarnAt is the share of a subscription window (0-1) at which
+		// the TUI warns. Default 0.9.
+		UsageWarnAt float64 `yaml:"usageWarnAt"`
+		// SenapatiAllowedTools / SenapatiDeniedTools add to Senapati's tool
+		// lockdown (Claude Code tool rules, e.g. "mcp__github" or
+		// "mcp__linear__delete_comment"); a denial wins over any allow.
+		SenapatiAllowedTools []string `yaml:"senapatiAllowedTools"`
+		SenapatiDeniedTools  []string `yaml:"senapatiDeniedTools"`
+		// SainikArgs are extra claude flags for every sainik.
+		SainikArgs []string `yaml:"sainikArgs"`
+	} `yaml:"claude"`
+	State struct {
 		SenapatiFile string `yaml:"senapatiFile"`
 		// LinearThreadsFile remembers the Linear comment threads Senapati
 		// has written in, so replies in them reach it. Defaults to
@@ -64,6 +87,10 @@ type Config struct {
 		} `yaml:"model"`
 		RotationThreshold float64 `yaml:"rotationThreshold"`
 		InstructionsFile  string  `yaml:"instructionsFile"`
+		// FallbackModel (claude harness): when Senapati hits a usage limit it
+		// is switched to this model - on another provider, e.g. a Codex model -
+		// and continues at once instead of pausing until the reset.
+		FallbackModel string `yaml:"fallbackModel"`
 		// ExtraPermissions are appended to the rules that restrict Senapati
 		// to Mahamantri and Linear (see senapati.Permissions) - e.g. another
 		// MCP server it should be able to use.
@@ -105,6 +132,21 @@ func Load(path string) (Config, error) {
 	if c.State.LinearThreadsFile == "" {
 		c.State.LinearThreadsFile = "mahamantri-linear-threads.json"
 	}
+	if c.Harness == "" {
+		c.Harness = "opencode"
+	}
+	if c.Claude.Binary == "" {
+		c.Claude.Binary = "claude"
+	}
+	if c.Claude.StateFile == "" {
+		c.Claude.StateFile = "mahamantri-claude.json"
+	}
+	if c.Claude.IdleExit == 0 {
+		c.Claude.IdleExit = 10 * time.Minute
+	}
+	if c.Claude.UsageWarnAt == 0 {
+		c.Claude.UsageWarnAt = 0.9
+	}
 	c.resolvePaths()
 	if err := c.Validate(); err != nil {
 		return Config{}, fmt.Errorf("config %s: %w", abs, err)
@@ -125,7 +167,7 @@ func (c *Config) applyEnvFallbacks() {
 }
 
 func (c *Config) resolvePaths() {
-	for _, p := range []*string{&c.Attention.RegistryFile, &c.State.SenapatiFile, &c.State.LinearThreadsFile, &c.Senapati.InstructionsFile} {
+	for _, p := range []*string{&c.Attention.RegistryFile, &c.State.SenapatiFile, &c.State.LinearThreadsFile, &c.Senapati.InstructionsFile, &c.Claude.StateFile} {
 		if *p != "" && !filepath.IsAbs(*p) {
 			*p = filepath.Join(c.Dir, *p)
 		}
@@ -133,14 +175,25 @@ func (c *Config) resolvePaths() {
 }
 
 func (c Config) Validate() error {
-	u, err := url.Parse(c.Opencode.ServerURL)
+	switch c.Harness {
+	case "opencode", "":
+		u, err := url.Parse(c.Opencode.ServerURL)
+		switch {
+		case c.Opencode.ServerURL == "":
+			return fmt.Errorf("opencode.serverURL is required")
+		case err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "":
+			return fmt.Errorf("opencode.serverURL %q must look like http://localhost:4096", c.Opencode.ServerURL)
+		case c.Opencode.Password == "":
+			return fmt.Errorf("opencode.password is required (or set OPENCODE_SERVER_PASSWORD)")
+		}
+	case "claude":
+		if c.Claude.UsageWarnAt < 0 || c.Claude.UsageWarnAt > 1 {
+			return fmt.Errorf("claude.usageWarnAt must be between 0 and 1")
+		}
+	default:
+		return fmt.Errorf("harness %q must be \"opencode\" or \"claude\"", c.Harness)
+	}
 	switch {
-	case c.Opencode.ServerURL == "":
-		return fmt.Errorf("opencode.serverURL is required")
-	case err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "":
-		return fmt.Errorf("opencode.serverURL %q must look like http://localhost:4096", c.Opencode.ServerURL)
-	case c.Opencode.Password == "":
-		return fmt.Errorf("opencode.password is required (or set OPENCODE_SERVER_PASSWORD)")
 	case c.Linear.SigningSecret == "":
 		return fmt.Errorf("linear.signingSecret is required (or set LINEAR_SIGNING_SECRET)")
 	case c.Linear.ListenAddr == "":
@@ -156,7 +209,7 @@ func (c Config) Validate() error {
 		return fmt.Errorf("attention.listenAddr is required")
 	case !loopback(c.Attention.ListenAddr):
 		return fmt.Errorf("attention.listenAddr %q must be a loopback address such as 127.0.0.1:4097: "+
-			"it serves the opencode API with mahamantri's credentials, unauthenticated", c.Attention.ListenAddr)
+			"it drives agent sessions with mahamantri's credentials, unauthenticated", c.Attention.ListenAddr)
 	case c.Attention.RegistryFile == "":
 		return fmt.Errorf("attention.registryFile is required")
 	case c.State.SenapatiFile == "":
@@ -164,12 +217,15 @@ func (c Config) Validate() error {
 	case c.Senapati.RotationThreshold <= 0 || c.Senapati.RotationThreshold > 1:
 		return fmt.Errorf("senapati.rotationThreshold must be between 0 and 1")
 	}
-	if c.Sainik.DefaultModel != "" && !isModelRef(c.Sainik.DefaultModel) {
-		return fmt.Errorf("sainik.defaultModel %q must look like provider/id", c.Sainik.DefaultModel)
-	}
-	for i, m := range c.Models {
-		if !isModelRef(m.ID) {
-			return fmt.Errorf("models[%d].id %q must look like provider/id", i, m.ID)
+	// opencode names a model provider/id; Claude Code by its id alone.
+	if c.Harness != "claude" {
+		if c.Sainik.DefaultModel != "" && !isModelRef(c.Sainik.DefaultModel) {
+			return fmt.Errorf("sainik.defaultModel %q must look like provider/id", c.Sainik.DefaultModel)
+		}
+		for i, m := range c.Models {
+			if !isModelRef(m.ID) {
+				return fmt.Errorf("models[%d].id %q must look like provider/id", i, m.ID)
+			}
 		}
 	}
 	for i, r := range c.Senapati.ExtraPermissions {

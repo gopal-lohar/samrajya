@@ -1,5 +1,10 @@
 # Relative paths below resolve against the directory containing this file,
 # not the directory you launch mahamantri from.
+
+# What sessions run on: "claude" (Claude Code, run by mahamantri; uses your
+# Claude subscription and whatever your Claude Code setup routes to) or
+# "opencode" (an already-running `opencode serve`, configured below).
+harness: opencode
 opencode:
   serverURL: http://localhost:4096
   # `opencode serve` picks a NEW password every start. Either paste the current
@@ -28,7 +33,7 @@ state:
   linearThreadsFile: "./mahamantri-linear-threads.json"   # comment threads Senapati has written in
 sainik:
   directory: ""              # working directory for sainik sessions (the repo they work in)
-  defaultModel: ""           # provider/id used when Senapati names none, e.g. openai/gpt-6-sol
+  defaultModel: ""           # opencode: provider/id, e.g. openai/gpt-6-sol; claude: the model id, e.g. claude-opus-5
   agent: ""                  # opencode agent for sainiks, optional
 # Models Senapati may choose for a sainik, with guidance it reads in its briefing.
 models: []
@@ -48,9 +53,20 @@ senapati:
   # service URLs). Agent-file frontmatter is ignored.
   instructionsFile: "../senapati/senapati.md"
   rotationThreshold: 0.4     # fraction of the model's context limit that triggers a new Senapati session
+  # claude harness: when Senapati hits a usage limit, switch it to this model
+  # (another provider, e.g. a Codex model) and continue at once.
+  fallbackModel: ""
   # Senapati's tools are restricted to curl to mahamantri, jq and the Linear
   # MCP tools (linear_*), so the work can only go to a sainik. Rules added here
   # come after those (the last matching rule wins); "ask" is not allowed -
   # nobody is there to answer it.
   extraPermissions: []
   #  - {action: "github_*", resource: "*", effect: allow}
+# Only for harness: claude.
+claude:
+  binary: claude             # path to Claude Code
+  idleExit: 10m              # a session's process exits after this long idle; the next message resumes it
+  usageWarnAt: 0.9           # TUI warns when a subscription window is this full
+  senapatiAllowedTools: []   # added to Senapati's allowlist (curl to mahamantri, jq, mcp__linear)
+  senapatiDeniedTools: []    # e.g. [mcp__linear__delete_comment]; a denial wins over any allow
+  sainikArgs: []             # extra claude flags for every sainik, e.g. ["--effort", "high"]

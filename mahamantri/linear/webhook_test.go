@@ -3,6 +3,7 @@ package linear
 import (
 	"bytes"
 	"errors"
+	"github.com/gopal-lohar/samrajya/mahamantri/harness"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -53,7 +54,7 @@ func TestHandlerForwardsAMentionWithItsSainik(t *testing.T) {
 	h.Sainiks = func(issue string) []Sainik {
 		return []Sainik{{Label: "sainik-" + issue + "-fix", SessionID: "ses_k", Status: "running"}}
 	}
-	h.Mahamantri = "http://127.0.0.1:4097"
+	h.Commands = harness.For("opencode", "http://127.0.0.1:4097")
 	if rec := deliver(t, h, "s3cret", mentionBody, nil); rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
 	}

@@ -229,3 +229,58 @@ func TestExtraPermissions(t *testing.T) {
 		t.Errorf("an ask rule would hang Senapati and must be rejected: %v", err)
 	}
 }
+
+const claudeYAML = `
+harness: claude
+linear:
+  signingSecret: lin_wh_test
+  listenAddr: ":45821"
+  botUserID: "11111111-2222-4333-8444-555555555555"
+  botHandle: "senapati-bot"
+attention:
+  listenAddr: "127.0.0.1:4097"
+  registryFile: "./registry.json"
+state:
+  senapatiFile: "./senapati.json"
+sainik:
+  defaultModel: claude-opus-5
+models:
+  - {id: gpt-6-sol, use: hard reasoning}
+senapati:
+  model: {id: claude-opus-5}
+  fallbackModel: gpt-6-sol
+  rotationThreshold: 0.4
+claude:
+  idleExit: 3m
+  senapatiDeniedTools: [mcp__linear__delete_comment]
+`
+
+// The Claude Code harness needs no opencode server, and names models by id.
+func TestClaudeHarnessConfig(t *testing.T) {
+	path := writeConfig(t, claudeYAML)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(path)
+	if c.Harness != "claude" || c.Claude.Binary != "claude" || c.Claude.IdleExit != 3*time.Minute || c.Claude.UsageWarnAt != 0.9 ||
+		c.Claude.StateFile != filepath.Join(dir, "mahamantri-claude.json") || c.Senapati.FallbackModel != "gpt-6-sol" ||
+		c.Claude.SenapatiDeniedTools[0] != "mcp__linear__delete_comment" {
+		t.Errorf("config = %+v", c.Claude)
+	}
+}
+
+func TestHarnessDefaultsToOpencodeAndRejectsUnknown(t *testing.T) {
+	c, err := Load(writeConfig(t, validYAML))
+	if err != nil || c.Harness != "opencode" {
+		t.Errorf("harness = %q, %v", c.Harness, err)
+	}
+	if _, err := Load(writeConfig(t, "harness: codex\n"+validYAML)); err == nil || !strings.Contains(err.Error(), `harness "codex"`) {
+		t.Errorf("err = %v", err)
+	}
+	// opencode still requires provider/id model names
+	bad := strings.Replace(validYAML, "senapati:\n", "sainik:\n  defaultModel: gpt-6-sol\nsenapati:\n", 1)
+	if _, err := Load(writeConfig(t, bad)); err == nil {
+		t.Error("opencode harness must reject a model without a provider")
+	}
+}

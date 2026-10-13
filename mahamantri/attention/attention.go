@@ -13,6 +13,7 @@ var completionTypes = map[string]bool{
 	"session.execution.succeeded":   true,
 	"session.execution.failed":      true,
 	"session.execution.interrupted": true,
+	"session.manual.ended":          true, // claude harness: a person handed it back
 }
 
 // Required reports whether ev is something a manager needs to act on:

@@ -1,13 +1,20 @@
 # mahamantri
 
-The relay between Linear and opencode in Samrajya. It connects to an
-already-running `opencode` server, creates or resumes one session as
-"Senapati" (the manager agent), and sends it short notifications:
-(a) **Linear pings**, meaning a comment that mentions Senapati or a reply in a
-thread it wrote in, and (b) **sainik notices**, meaning events on the opencode
-sessions ("sainiks") that do the work, one per issue. It also gives Senapati
-its tools: one local API to start, message and inspect sainiks, plus a
-credential-holding gateway to the whole opencode API.
+The relay between Linear and the agent sessions that work in Samrajya. It
+runs one session as "Senapati" (the manager agent) and sends it short
+notifications: (a) **Linear pings**, meaning a comment that mentions Senapati
+or a reply in a thread it wrote in, and (b) **sainik notices**, meaning events
+on the sessions ("sainiks") that do the work, one per issue. It also gives
+Senapati its tools: one local API to start, message and inspect sainiks.
+
+Sessions run on one of two **harnesses** (`harness:` in the config):
+
+- **`claude`**: Claude Code, run by mahamantri itself. This is the way to use
+  a Claude subscription, plus anything your Claude Code setup routes to (for
+  example Codex models through a proxy). See
+  [The Claude Code harness](#the-claude-code-harness).
+- **`opencode`** (the default): an already-running `opencode serve`, driven
+  through its API.
 
 Built from two earlier prototypes, an opencode event bridge (SSE client,
 attention registry/broadcaster/HTTP API) and a Linear webhook receiver
@@ -78,6 +85,78 @@ live with that:
 Editing any other setting while running is noticed too, and the TUI tells
 you a restart is needed.
 
+## The Claude Code harness
+
+Claude Code has no server, so mahamantri runs it. A session is a transcript
+on disk (`~/.claude/projects/...`), and mahamantri gives it a process only
+while it has work: `claude -p --input-format stream-json --output-format
+stream-json`, with `--resume <id>` after its first turn. A process that has
+been idle for `claude.idleExit` (default 10m) exits, and the next message
+starts a new one. Everything below was verified live against Claude Code
+2.1.29x; `claudecode/harness_test.go` replays the same protocol with a fake
+`claude`.
+
+- **Setup.** Claude Code must be installed and logged in. Your own
+  `~/.claude` settings apply, including `env` (e.g. an
+  `ANTHROPIC_BASE_URL` proxy that routes GPT model IDs to Codex) and your MCP
+  servers (Senapati needs the `linear` one). No `opencode:` section is
+  needed. Models are named by ID alone (`claude-opus-5`, `gpt-6-sol`), not
+  `provider/id`.
+- **Sainiks** run with permissions bypassed and `AskUserQuestion` disabled,
+  so nothing ever waits for an answer. A sainik that needs a decision ends its
+  turn and asks in its reply, which reaches Senapati in the finished notice.
+  Add flags with `claude.sainikArgs`.
+- **Senapati** runs with `--permission-mode dontAsk --tools Bash` and an
+  allowlist: `curl` to mahamantri, `jq`, and the Linear MCP tools
+  (`mcp__linear__*`). Everything else is denied rather than asked. Adjust it
+  with `claude.senapatiAllowedTools` and `claude.senapatiDeniedTools`; a
+  denial wins. Its role goes in with `--append-system-prompt`, rendered fresh
+  on every request (`--system-prompt-snapshot off`), so editing
+  `senapati.md` reaches a resumed Senapati.
+- **The API Senapati uses** is `/claude/...` on mahamantri:
+  - create a sainik and send its task in one call
+  - prompt it, with `queue` (after its current turn, the default) or
+    `steer` (into it)
+  - interrupt it
+  - read its state and latest reply
+  - move it to another model
+  - delete it
+  - read usage limits
+
+  The same rules as the opencode gateway apply: titles are
+  `sainik-<ISSUE>-<slug>`, one sainik per issue, and Senapati's own session
+  can't be driven through the API. Any unknown path answers with the list.
+- **Queue vs steer.** A message written to a running `claude` process is
+  folded into its current turn, so `queue` is done by mahamantri: the message
+  is held and sent when the turn's result arrives. The queued work runs in
+  the same execution, so one finished notice covers both.
+- **Interrupt** sends Claude Code's own interrupt request on stdin. The
+  running tool call stops, nothing is orphaned, and the process stays up for
+  the next message. If the request isn't honored within 10s, the process gets
+  SIGINT and anything it started that outlives it is killed.
+- **Usage limits.** Every turn reports subscription usage per window (5-hour,
+  7-day), shown at `/claude/limits`; the TUI warns at `claude.usageWarnAt`
+  (default 90%). A turn stopped by a limit (`"error":"rate_limit"`, "You've
+  hit your session limit · resets 2pm (UTC)") pauses the session (state
+  `limited`) until the reset. Messages sent to it meanwhile are held. At the
+  reset mahamantri tells it to continue, then delivers what was held; nobody
+  waits. Senapati gets a notice saying so, with the command to move the
+  sainik to another provider's model if it can't wait; the session keeps its
+  whole conversation across the switch. `senapati.fallbackModel` does that
+  automatically for Senapati itself.
+- **Stepping in.** The TUI footer shows `cd <dir> && claude --resume <id>` for
+  the selected session. If the session is mid-turn, it shows the interrupt
+  command to run first. mahamantri lists open sessions with `claude agents
+  --json` every few seconds. A session open in a process it didn't start is
+  yours: it is marked `manual`, its idle process is let go, messages for it
+  are held, and Senapati is told. When you close it, Senapati gets it back
+  with your last reply, read from the transcript, and the held messages run.
+- **Restarts.** Sessions are remembered in `mahamantri-claude.json`. On
+  shutdown, running turns are interrupted. On the next start, Senapati is
+  told which sainiks were cut off mid-turn so it can prompt them again.
+- **Context use** for Senapati's rotation is measured from the last API call
+  of a turn. The turn's own totals are summed over every call it made.
+
 ## The TUI
 
 Shows the current Senapati session (ID, and when it started), its retired
@@ -105,6 +184,8 @@ Next to the config file, whatever directory you launch from:
   rather than part of the yaml because mahamantri rewrites it (on rotation)
   and rewriting your hand-edited config would clobber it.
 - `mahamantri-registry.json` - registered sainiks.
+- `mahamantri-claude.json` - Claude Code harness only: the sessions it runs
+  (directory, model, flags, latest reply, usage-limit pauses).
 - `mahamantri-linear-threads.json` - Linear comment threads Senapati has
   written in, so replies in them reach it.
 - `mahamantri.log` - every Linear delivery in full, plus warnings.

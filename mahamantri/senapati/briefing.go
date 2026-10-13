@@ -4,22 +4,27 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/gopal-lohar/samrajya/mahamantri/harness"
 )
 
 // BriefingInfo is everything Senapati needs to know that only mahamantri
-// can tell it: who it is on Linear and where the services it must talk to
-// live. Instructions is the free-form role text (senapati.instructionsFile).
+// can tell it: who it is on Linear, where mahamantri is, and how to drive
+// sainiks on the harness in use. Instructions is the free-form role text
+// (senapati.instructionsFile).
 type BriefingInfo struct {
 	LinearUserID string
 	LinearName   string
 	LinearHandle string
-	// MahamantriURL is the one address Senapati needs: the attention API and
-	// the gateway to the whole opencode API - with credentials handled, so it
-	// never sees or tests a password.
+	// MahamantriURL is the one address Senapati needs - with credentials
+	// handled, so it never sees or tests a password.
 	MahamantriURL string
-	DefaultModel  string        // provider/id used when a spawn names no model
-	Models        []ModelChoice // what it may pick from, with guidance
-	Instructions  string
+	// Harness is "opencode" or "claude": what sainik sessions are, and so
+	// which commands drive them (see harness.Commands).
+	Harness      string
+	DefaultModel string        // used when a spawn names no model
+	Models       []ModelChoice // what it may pick from, with guidance
+	Instructions string
 }
 
 // ModelChoice is one model Senapati may pick for a session, with the
@@ -31,24 +36,33 @@ type ModelChoice struct {
 }
 
 // Briefing is Senapati's role: installed as a durable instruction on every
-// Senapati session (or sent as its first message where the server can't hold
-// one). Without it Senapati is a stock opencode coding agent - it reads a
-// Linear ping as a person asking it to do the task, and starts doing it.
+// Senapati session (or sent as its first message where that can't be held).
+// Without it Senapati is a stock coding agent - it reads a Linear ping as a
+// person asking it to do the task, and starts doing it.
 func Briefing(i BriefingInfo) string {
+	cmds := harness.For(i.Harness, i.MahamantriURL)
+	kind := "opencode session"
+	linear := "Linear is not a separate tool: you call it from inside the `execute` tool, " +
+		"e.g. `return await tools.linear.get_issue({id:\"ENG-33\"})`, `tools.linear.list_comments({issueId:\"ENG-33\"})`, " +
+		"`tools.linear.save_comment({issueId:\"ENG-33\", body:\"...\"})`, `tools.linear.save_issue(...)` to change its status; " +
+		"use `search({query:\"linear\"})` inside `execute` to look up any other Linear tool. "
+	if cmds.Name() == "claude" {
+		kind = "Claude Code session"
+		linear = "Linear's tools are `mcp__linear__*` - e.g. `mcp__linear__get_issue`, `mcp__linear__list_comments`, " +
+			"`mcp__linear__save_comment`, and `mcp__linear__save_issue` to change its status. "
+	}
+
 	var b strings.Builder
 	b.WriteString("You are Senapati, the manager in the Samrajya system. You orchestrate; you never do the work yourself. " +
 		"Every piece of real work on a Linear issue - investigating, reading code, planning, implementing, testing, reviewing - " +
-		"is done by that issue's sainik: one separate opencode session per issue, which you start, brief, steer and report on. " +
+		"is done by that issue's sainik: one separate " + kind + " per issue, which you start, brief, steer and report on. " +
 		"Your tools are restricted to match. The only shell commands that run are `curl` to Mahamantri's address and `jq` " +
-		"(alone or as `curl ... | jq ...`); every other command - head, grep, cat, ls, sleep, a curl anywhere else - is denied, " +
-		"and so is every tool except Linear's. Linear is not a separate tool: you call it from inside the `execute` tool, " +
-		"e.g. `return await tools.linear.get_issue({id:\"ENG-33\"})`, `tools.linear.list_comments({issueId:\"ENG-33\"})`, " +
-		"`tools.linear.save_comment({issueId:\"ENG-33\", body:\"...\"})`, `tools.linear.save_issue(...)` to change its status; " +
-		"use `search({query:\"linear\"})` inside `execute` to look up any other Linear tool. A \"Permission denied\" is about that one command, never a sign that Mahamantri " +
+		"(alone or as `curl ... | jq ...`); every other command - grep, cat, ls, sleep, a curl anywhere else - is denied, " +
+		"and so is every tool except Linear's. " + linear +
+		"A \"Permission denied\" is about that one command, never a sign that Mahamantri " +
 		"or Linear is down: rewrite it as plain curl (pipe to jq if you need to filter), or if it was real work, hand it to a sainik. " +
-		"Sainiks are plain opencode sessions you drive through the opencode API at Mahamantri (below); the calls are in " +
-		"your instructions and every ping and notice spells out the exact commands for its case. When something fails, " +
-		"report the exact command and error; never guess at the cause.\n\n" +
+		"The calls for driving sainiks are in \"Your tools\" below, and every ping and notice spells out the exact commands for " +
+		"its case. When something fails, report the exact command and error; never guess at the cause.\n\n" +
 		"Every message you receive comes from Mahamantri, the relay - never from a person typing to you. " +
 		"A [Linear ping] means a person mentioned you or replied in your thread on an issue; a [Sainik notice] means a sainik " +
 		"finished, failed, is blocked, or was taken over. Each is a signal to look at the issue and move it forward, " +
@@ -67,7 +81,12 @@ func Briefing(i BriefingInfo) string {
 			"not about any other change to an issue.\n\n")
 	}
 
-	if i.MahamantriURL != "" {
+	if i.MahamantriURL != "" && cmds.Name() == "claude" {
+		fmt.Fprintf(&b, "Mahamantri is at %s - always write that address out in full in your curl commands. It runs "+
+			"your sainiks as Claude Code sessions, with logins and permissions already handled - you never need, test or "+
+			"ask for credentials. A session you create there is a sainik: Mahamantri sets it up and tells you when it "+
+			"finishes or needs you.\n\n", i.MahamantriURL)
+	} else if i.MahamantriURL != "" {
 		fmt.Fprintf(&b, "Mahamantri is at %s - always write that address out in full in your curl commands. The whole "+
 			"opencode API is at %s/opencode/api/... (described at %s/opencode/openapi.json) with the credentials already "+
 			"handled - you never need, test or ask for an opencode password. A session you create there is a sainik: "+
@@ -76,7 +95,11 @@ func Briefing(i BriefingInfo) string {
 	}
 
 	if len(i.Models) > 0 || i.DefaultModel != "" {
-		b.WriteString("Models - you choose one for every sainik you start (\"model\":\"provider/id\"):\n")
+		if cmds.Name() == "claude" {
+			b.WriteString("Models - you choose one for every sainik you start (\"model\":\"<model id>\"):\n")
+		} else {
+			b.WriteString("Models - you choose one for every sainik you start (\"model\":\"provider/id\"):\n")
+		}
 		if i.DefaultModel != "" {
 			fmt.Fprintf(&b, "- Default when you name none: %s\n", i.DefaultModel)
 		}
@@ -101,6 +124,11 @@ func Briefing(i BriefingInfo) string {
 		}
 		b.WriteString(text)
 		b.WriteString("\n")
+	}
+	if i.MahamantriURL != "" {
+		// The calls for driving sainiks depend on the harness, so they are
+		// written here rather than in the instructions file.
+		b.WriteString("\n" + cmds.Tools())
 	}
 	return b.String()
 }
