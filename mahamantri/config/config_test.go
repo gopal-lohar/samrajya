@@ -285,3 +285,32 @@ func TestHarnessDefaultsToOpencodeAndRejectsUnknown(t *testing.T) {
 		t.Error("opencode harness must reject a model without a provider")
 	}
 }
+
+func TestWorkspace(t *testing.T) {
+	path := writeConfig(t, validYAML)
+	ws := filepath.Join(filepath.Dir(path), "repos")
+	os.MkdirAll(filepath.Join(ws, "app"), 0o755)
+	c, err := Load(writeConfigAt(t, path, "workspace: ./repos\nsainik:\n  directory: ./repos/app\n"+validYAML))
+	if err != nil || c.Workspace != ws || c.Sainik.Directory != filepath.Join(ws, "app") {
+		t.Fatalf("workspace=%q dir=%q err=%v", c.Workspace, c.Sainik.Directory, err)
+	}
+	if _, err := Load(writeConfigAt(t, path, "workspace: ./repos\nsainik:\n  directory: /tmp\n"+validYAML)); err == nil || !strings.Contains(err.Error(), "inside workspace") {
+		t.Errorf("sainik.directory outside the workspace: %v", err)
+	}
+	if _, err := Load(writeConfigAt(t, path, "workspace: ./nope\n"+validYAML)); err == nil {
+		t.Error("a missing workspace must be an error")
+	}
+	for path, want := range map[string]bool{"/srv/ws": true, "/srv/ws/a/b": true, "/srv/wsx": false, "/srv": false, "/srv/ws/../x": false} {
+		if Within("/srv/ws", path) != want {
+			t.Errorf("Within(/srv/ws, %s) != %v", path, want)
+		}
+	}
+}
+
+func writeConfigAt(t *testing.T, path, contents string) string {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}

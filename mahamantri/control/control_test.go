@@ -272,3 +272,21 @@ func TestUnknownPathsAnswerWithTheAPI(t *testing.T) {
 		t.Error("help must not reach opencode")
 	}
 }
+
+func TestCreateConfinesToTheWorkspaceAndInstallsTheRules(t *testing.T) {
+	mux, oc, _ := setup(t, Options{Workspace: "/srv/ws", Role: func(dir string) string { return "RULES for " + dir }, RoleKey: "samrajya.sainik"})
+	rec := do(mux, "POST", "/opencode/api/session", `{"title":"sainik-ENG-1-a","location":{"directory":"app"}}`)
+	if rec.Code != http.StatusOK || rec.Header().Get("X-Mahamantri-Warning") != "" {
+		t.Fatalf("%d %s %v", rec.Code, rec.Body, rec.Header())
+	}
+	if d := oc.bodies[0]["location"].(map[string]any)["directory"]; d != "/srv/ws/app" {
+		t.Errorf("directory = %v", d)
+	}
+	if len(oc.requests) != 2 || oc.requests[1] != "PUT /api/experimental/session/ses_new/instructions/entries/samrajya.sainik" || oc.bodies[1]["value"] != "RULES for /srv/ws/app" {
+		t.Errorf("rules not installed: %v %v", oc.requests, oc.bodies)
+	}
+	rec = do(mux, "POST", "/opencode/api/session", `{"title":"sainik-ENG-2-a","location":{"directory":"/etc"}}`)
+	if rec.Code != http.StatusBadRequest || len(oc.requests) != 2 {
+		t.Errorf("outside the workspace: %d, requests %v", rec.Code, oc.requests)
+	}
+}

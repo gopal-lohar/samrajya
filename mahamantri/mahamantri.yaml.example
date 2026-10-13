@@ -32,7 +32,7 @@ state:
   senapatiFile: "./mahamantri-senapati.json"   # holds the current + retired Senapati session IDs
   linearThreadsFile: "./mahamantri-linear-threads.json"   # comment threads Senapati has written in
 sainik:
-  directory: ""              # working directory for sainik sessions (the repo they work in)
+  directory: ""              # default working directory for sainiks; inside the workspace (empty: the workspace itself)
   defaultModel: ""           # opencode: provider/id, e.g. openai/gpt-6-sol; claude: the model id, e.g. claude-opus-5
   agent: ""                  # opencode agent for sainiks, optional
 # Models Senapati may choose for a sainik, with guidance it reads in its briefing.

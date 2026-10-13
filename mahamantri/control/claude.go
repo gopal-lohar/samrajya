@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"path/filepath"
 	"strings"
 
 	"github.com/gopal-lohar/samrajya/mahamantri/attention"
 	"github.com/gopal-lohar/samrajya/mahamantri/claudecode"
+	"github.com/gopal-lohar/samrajya/mahamantri/config"
 	"github.com/gopal-lohar/samrajya/mahamantri/opencode"
 )
 
@@ -31,6 +34,10 @@ type ClaudeOptions struct {
 	DefaultModel string
 	Agent        string
 	Args         []string // permission and tool flags (senapati.ClaudeSainikArgs)
+	Workspace    string   // sainiks must work inside it; empty = anywhere
+	// Role gives the standing rules for a sainik working in dir
+	// (senapati.SainikRole plus its project's notes).
+	Role func(dir string) string
 }
 
 // ClaudePrefix is where the Claude Code sessions API is mounted.
@@ -75,11 +82,16 @@ func (c *claudeAPI) create(w http.ResponseWriter, r *http.Request) {
 	if !checkSainik(w, r, c.reg, req.Title) {
 		return
 	}
+	dir, ok := workDir(w, req.Dir, c.opt.Directory, c.opt.Workspace)
+	if !ok {
+		return
+	}
 	spec := claudecode.Spec{
 		Title: req.Title,
-		Dir:   firstNonEmpty(req.Dir, c.opt.Directory),
+		Dir:   dir,
 		Model: firstNonEmpty(req.Model, c.opt.DefaultModel),
 		Agent: firstNonEmpty(req.Agent, c.opt.Agent),
+		Role:  roleFor(c.opt.Role, dir),
 		Args:  c.opt.Args,
 	}
 	id, err := c.s.Create(spec)
@@ -204,6 +216,29 @@ func (c *claudeAPI) delete(w http.ResponseWriter, r *http.Request) {
 
 func (c *claudeAPI) limits(w http.ResponseWriter, r *http.Request) {
 	attention.WriteJSON(w, http.StatusOK, map[string]any{"limits": c.s.Limits()})
+}
+
+func roleFor(role func(string) string, dir string) string {
+	if role == nil {
+		return ""
+	}
+	return role(dir)
+}
+
+// workDir resolves a sainik's working directory - the one asked for (relative
+// to the workspace), else the default, else the workspace - and refuses one
+// outside the workspace, answering the request itself.
+func workDir(w http.ResponseWriter, asked, def, workspace string) (string, bool) {
+	dir := firstNonEmpty(asked, def, workspace)
+	if dir != "" && !filepath.IsAbs(dir) && workspace != "" {
+		dir = filepath.Join(workspace, dir)
+	}
+	if workspace != "" && !config.Within(workspace, dir) {
+		attention.WriteError(w, http.StatusBadRequest, fmt.Sprintf("directory %q is outside the workspace %s: "+
+			"sainiks work only on the projects inside it - pick the project's directory there", dir, workspace))
+		return "", false
+	}
+	return dir, true
 }
 
 func writeSessionError(w http.ResponseWriter, doing string, err error) {

@@ -178,3 +178,26 @@ func TestClaudeUnknownPathsAnswerWithTheAPI(t *testing.T) {
 		}
 	}
 }
+
+// Sainiks get the standing rules, start inside the workspace, and cannot be
+// started outside it.
+func TestClaudeCreateConfinesSainiksToTheWorkspace(t *testing.T) {
+	mux, s, _ := claudeSetup(t, ClaudeOptions{Workspace: "/srv/ws", Role: func(dir string) string { return "RULES for " + dir }})
+	rec := do(mux, "POST", "/claude/session", `{"title":"sainik-ENG-1-a","directory":"app"}`)
+	var out map[string]string
+	json.Unmarshal(rec.Body.Bytes(), &out)
+	if spec := s.specs[out["id"]]; spec.Dir != "/srv/ws/app" || spec.Role != "RULES for /srv/ws/app" {
+		t.Errorf("spec = %+v", spec)
+	}
+	rec = do(mux, "POST", "/claude/session", `{"title":"sainik-ENG-2-a"}`)
+	json.Unmarshal(rec.Body.Bytes(), &out)
+	if spec := s.specs[out["id"]]; spec.Dir != "/srv/ws" {
+		t.Errorf("default dir = %q, want the workspace", spec.Dir)
+	}
+	for _, dir := range []string{"/home/someone/app", "../outside", "/srv/wsx"} {
+		rec := do(mux, "POST", "/claude/session", `{"title":"sainik-ENG-3-a","directory":"`+dir+`"}`)
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "outside the workspace") {
+			t.Errorf("%s: %d %s", dir, rec.Code, rec.Body)
+		}
+	}
+}

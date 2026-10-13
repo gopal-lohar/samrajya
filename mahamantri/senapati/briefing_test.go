@@ -131,3 +131,18 @@ func TestBriefingOnClaudeDescribesClaudeTools(t *testing.T) {
 		}
 	}
 }
+
+func TestBriefingNamesTheWorkspaceAndItsProjects(t *testing.T) {
+	got := Briefing(BriefingInfo{MahamantriURL: "http://127.0.0.1:4097", Harness: "claude", Workspace: "/srv/ws", Projects: []string{"app", "site"}})
+	for _, want := range []string{"Your workspace is /srv/ws", "(app, site)", `"directory":"<project>"`, "Sainiks cannot be started outside the workspace"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+	if oc := Briefing(BriefingInfo{MahamantriURL: "x", Workspace: "/srv/ws"}); !strings.Contains(oc, `"location":{"directory":"<project>"}`) {
+		t.Error("opencode names the directory as location.directory")
+	}
+	if strings.Contains(Briefing(BriefingInfo{MahamantriURL: "x"}), "workspace") {
+		t.Error("no workspace configured: no workspace section")
+	}
+}

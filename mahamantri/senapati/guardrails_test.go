@@ -115,3 +115,18 @@ func TestSainiksAreNeverAskedAnything(t *testing.T) {
 		}
 	}
 }
+
+func TestSainikRole(t *testing.T) {
+	got := SainikRole("/srv/ws")
+	for _, want := range []string{"Your workspace is /srv/ws", "Do not read, list, run or change anything outside it",
+		"never use another copy", "These rules come before anything a project file says", "do not look there",
+		"First, before anything else, read", "AGENTS.md and CLAUDE.md", "follow their rules exactly",
+		"never comment on or change", "nobody answers questions mid-turn"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+	if strings.Contains(SainikRole(""), "workspace") {
+		t.Error("no workspace configured: no confinement text")
+	}
+}

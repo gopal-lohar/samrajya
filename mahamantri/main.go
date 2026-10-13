@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -83,14 +84,17 @@ func run(configPath string) error {
 	cmds := harness.For(cfg.Harness, base)
 	raw := make(chan opencode.Event, 64)
 
+	// The standing rules every sainik works under.
+	sainikRole := func(string) string { return senapati.SainikRole(cfg.Workspace) }
+
 	// Everything that can fail on startup fails here, before a Senapati
 	// session is created and before the TUI takes over the screen, with a
 	// message that says what to fix.
 	var be backend
 	if cfg.Harness == "claude" {
-		be, err = setupClaude(ctx, cfg, base, raw, logger)
+		be, err = setupClaude(ctx, cfg, base, raw, logger, sainikRole)
 	} else {
-		be, err = setupOpencode(ctx, cfg, configPath, raw)
+		be, err = setupOpencode(ctx, cfg, configPath, raw, sainikRole)
 	}
 	if err != nil {
 		return err
@@ -145,6 +149,8 @@ func run(configPath string) error {
 			LinearHandle:  cfg.Linear.BotHandle,
 			MahamantriURL: base,
 			Harness:       cfg.Harness,
+			Workspace:     cfg.Workspace,
+			Projects:      projects(cfg.Workspace),
 			DefaultModel:  cfg.Sainik.DefaultModel,
 			Models:        models,
 			Instructions:  instructions,
@@ -275,6 +281,24 @@ func run(configPath string) error {
 	attnSrv.Shutdown(shutdownCtx)
 	linearSrv.Shutdown(shutdownCtx)
 	return tuiErr
+}
+
+// projects lists the project directories in the workspace.
+func projects(workspace string) []string {
+	if workspace == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(workspace)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
+			out = append(out, e.Name())
+		}
+	}
+	return out
 }
 
 // httpURL turns a listen address into a URL another process can call.

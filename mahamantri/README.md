@@ -85,6 +85,34 @@ live with that:
 Editing any other setting while running is noticed too, and the TUI tells
 you a restart is needed.
 
+## The workspace
+
+`workspace:` names the directory holding the projects this system works on,
+one directory per project. In this repo that's `repos/`, which git ignores:
+the projects are private and separate from samrajya, and nothing about them
+belongs in this repository.
+
+- **Senapati** is told the workspace and the projects in it. The list is read
+  whenever its briefing is built. It starts each sainik in the directory of
+  the project its issue is about.
+- **Sainiks** can't be started with a working directory outside the
+  workspace; the gateway refuses it on both harnesses. Every sainik also gets
+  standing rules from mahamantri: an appended system prompt on Claude Code,
+  an instruction entry on opencode (`samrajya.sainik`). The rules are:
+  - work only inside the workspace;
+  - never touch another copy of these projects elsewhere on the machine,
+    even if a file points to one;
+  - read and follow the project's own `AGENTS.md` and `CLAUDE.md` first;
+  - never write to Linear;
+  - end every turn with a report, including any decision it needs.
+- **Limits.** Confinement is by instruction plus the refused directories.
+  Sainiks still run with permissions bypassed, so a sainik that ignores its
+  rules can reach the rest of the machine. Hard confinement would need
+  Claude Code's sandbox (`bubblewrap` on Linux).
+- **Self-contained projects.** A project copied into the workspace should not
+  point outside it: lock files, notes or git hooks naming absolute paths of
+  another copy will send agents there.
+
 ## The Claude Code harness
 
 Claude Code has no server, so mahamantri runs it. A session is a transcript

@@ -17,6 +17,7 @@ package control
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -49,6 +50,11 @@ type Options struct {
 	DefaultModel string // provider/id
 	Agent        string
 	Permissions  []opencode.PermissionRule
+	Workspace    string // sainiks must work inside it; empty = anywhere
+	// Role gives the standing rules for a sainik working in dir, installed
+	// as the instruction entry RoleKey right after it is created.
+	Role    func(dir string) string
+	RoleKey string
 }
 
 // GatewayPrefix is where the opencode API is mounted, e.g.
@@ -130,8 +136,16 @@ func (g *gateway) createSainik(w http.ResponseWriter, r *http.Request) {
 	if _, set := body["permissions"]; !set && g.opt.Permissions != nil {
 		body["permissions"] = g.opt.Permissions
 	}
-	if _, set := body["location"]; !set && g.opt.Directory != "" {
-		body["location"] = map[string]string{"directory": g.opt.Directory}
+	asked := ""
+	if loc, ok := body["location"].(map[string]any); ok {
+		asked, _ = loc["directory"].(string)
+	}
+	dir, ok := workDir(w, asked, g.opt.Directory, g.opt.Workspace)
+	if !ok {
+		return
+	}
+	if dir != "" {
+		body["location"] = map[string]string{"directory": dir}
 	}
 	if _, set := body["model"]; !set && g.opt.DefaultModel != "" {
 		if provider, id, ok := strings.Cut(g.opt.DefaultModel, "/"); ok {
@@ -154,9 +168,31 @@ func (g *gateway) createSainik(w http.ResponseWriter, r *http.Request) {
 			if _, err := g.reg.Register(created.Data.ID, title); err != nil {
 				rec.header.Set("X-Mahamantri-Warning", "session created but not registered - you will not hear about it: "+err.Error())
 			}
+			if role := roleFor(g.opt.Role, dir); role != "" {
+				if err := g.installRole(r.Context(), created.Data.ID, role); err != nil {
+					rec.header.Set("X-Mahamantri-Warning", "session created without its standing rules: "+err.Error())
+				}
+			}
 		}
 	}
 	rec.copyTo(w)
+}
+
+// installRole puts the sainik's standing rules on the new session as a
+// durable instruction entry - before Senapati can send it anything.
+func (g *gateway) installRole(ctx context.Context, id, role string) error {
+	data, _ := json.Marshal(map[string]string{"value": role})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut,
+		GatewayPrefix+"/api/experimental/session/"+id+"/instructions/entries/"+g.opt.RoleKey, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	rec := record(g.proxy, req)
+	if rec.status >= 300 {
+		return fmt.Errorf("opencode answered %d: %s", rec.status, strings.TrimSpace(rec.body.String()))
+	}
+	return nil
 }
 
 // checkSainik enforces what holds for every sainik on any harness: its title

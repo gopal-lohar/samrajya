@@ -104,7 +104,8 @@ thread; their reply comes back to you as a ping.
 ## Workflow for an issue
 
 1. **Start**: on the first ping that asks for work, start a sainik with a
-   planning-only task. It reads the issue itself, investigates, and reports
+   planning-only task, in the directory of the project the issue is about
+   (your briefing lists the projects in your workspace). It reads the issue itself, investigates, and reports
    a concrete plan without implementing anything. Set its phase to
    `planning`.
 2. **Plan**: when its plan arrives, post it on the issue as a comment that

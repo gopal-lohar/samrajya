@@ -18,7 +18,7 @@ import (
 )
 
 // setupOpencode runs sessions on an already-running opencode server.
-func setupOpencode(ctx context.Context, cfg config.Config, configPath string, raw chan<- opencode.Event) (backend, error) {
+func setupOpencode(ctx context.Context, cfg config.Config, configPath string, raw chan<- opencode.Event, role func(string) string) (backend, error) {
 	client := opencode.New(cfg.Opencode.ServerURL, cfg.Opencode.Password)
 	pingCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	err := client.Ping(pingCtx)
@@ -56,6 +56,9 @@ func setupOpencode(ctx context.Context, cfg config.Config, configPath string, ra
 				DefaultModel: cfg.Sainik.DefaultModel,
 				Agent:        cfg.Sainik.Agent,
 				Permissions:  senapati.SainikPermissions(),
+				Workspace:    cfg.Workspace,
+				Role:         role,
+				RoleKey:      senapati.SainikInstructionKey,
 			})
 		},
 		attach: client.AttachCommand,
@@ -73,7 +76,7 @@ func setupOpencode(ctx context.Context, cfg config.Config, configPath string, ra
 
 // setupClaude runs sessions on Claude Code, one `claude -p` process per busy
 // session (see package claudecode).
-func setupClaude(ctx context.Context, cfg config.Config, base string, raw chan<- opencode.Event, logger *log.Logger) (backend, error) {
+func setupClaude(ctx context.Context, cfg config.Config, base string, raw chan<- opencode.Event, logger *log.Logger, role func(string) string) (backend, error) {
 	vctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	version, err := exec.CommandContext(vctx, cfg.Claude.Binary, "--version").Output()
 	cancel()
@@ -125,6 +128,8 @@ func setupClaude(ctx context.Context, cfg config.Config, base string, raw chan<-
 				DefaultModel: cfg.Sainik.DefaultModel,
 				Agent:        cfg.Sainik.Agent,
 				Args:         senapati.ClaudeSainikArgs(cfg.Claude.SainikArgs),
+				Workspace:    cfg.Workspace,
+				Role:         role,
 			})
 		},
 		attach: func(id string) string {

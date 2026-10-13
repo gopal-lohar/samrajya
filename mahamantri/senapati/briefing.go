@@ -21,7 +21,12 @@ type BriefingInfo struct {
 	MahamantriURL string
 	// Harness is "opencode" or "claude": what sainik sessions are, and so
 	// which commands drive them (see harness.Commands).
-	Harness      string
+	Harness string
+	// Workspace is the directory holding the projects, and Projects the
+	// directories in it - read when the briefing is built, so they are never
+	// part of this program.
+	Workspace    string
+	Projects     []string
 	DefaultModel string        // used when a spawn names no model
 	Models       []ModelChoice // what it may pick from, with guidance
 	Instructions string
@@ -92,6 +97,22 @@ func Briefing(i BriefingInfo) string {
 			"handled - you never need, test or ask for an opencode password. A session you create there is a sainik: "+
 			"Mahamantri sets it up and tells you when it finishes or needs an answer.\n\n",
 			i.MahamantriURL, i.MahamantriURL, i.MahamantriURL)
+	}
+
+	if i.Workspace != "" {
+		dirField := `"location":{"directory":"<project>"}`
+		if cmds.Name() == "claude" {
+			dirField = `"directory":"<project>"`
+		}
+		fmt.Fprintf(&b, "Your workspace is %s: the projects you work on, one directory each", i.Workspace)
+		if len(i.Projects) > 0 {
+			fmt.Fprintf(&b, " (%s)", strings.Join(i.Projects, ", "))
+		}
+		fmt.Fprintf(&b, ". Start every sainik in the directory of the project its issue is about - add %s to the "+
+			"create call, relative to the workspace. Sainiks cannot be started outside the workspace, and Mahamantri gives every "+
+			"sainik standing rules: stay inside the workspace, never touch copies of these projects elsewhere on the machine, "+
+			"follow the project's own AGENTS.md / CLAUDE.md, never write to Linear. You don't need to repeat those; do name the "+
+			"project in the task. If you can't tell which project an issue is about, ask on the issue.\n\n", dirField)
 	}
 
 	if len(i.Models) > 0 || i.DefaultModel != "" {

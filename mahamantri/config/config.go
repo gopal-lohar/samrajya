@@ -27,8 +27,12 @@ type ModelPolicy struct {
 type Config struct {
 	// Harness is what sessions run on: "opencode" (an opencode server) or
 	// "claude" (Claude Code, run by mahamantri). Empty means opencode.
-	Harness  string `yaml:"harness"`
-	Opencode struct {
+	Harness string `yaml:"harness"`
+	// Workspace is the directory holding the projects this system works on,
+	// one directory per project (e.g. ../repos). Sainiks are told to work
+	// only inside it, and cannot be started outside it. Empty: no limit.
+	Workspace string `yaml:"workspace"`
+	Opencode  struct {
 		ServerURL string `yaml:"serverURL"`
 		Password  string `yaml:"password"`
 	} `yaml:"opencode"`
@@ -171,7 +175,7 @@ func (c *Config) applyEnvFallbacks() {
 }
 
 func (c *Config) resolvePaths() {
-	for _, p := range []*string{&c.Attention.RegistryFile, &c.State.SenapatiFile, &c.State.LinearThreadsFile, &c.Senapati.InstructionsFile, &c.Claude.StateFile} {
+	for _, p := range []*string{&c.Attention.RegistryFile, &c.State.SenapatiFile, &c.State.LinearThreadsFile, &c.Senapati.InstructionsFile, &c.Claude.StateFile, &c.Workspace, &c.Sainik.Directory} {
 		if *p != "" && !filepath.IsAbs(*p) {
 			*p = filepath.Join(c.Dir, *p)
 		}
@@ -221,6 +225,14 @@ func (c Config) Validate() error {
 	case c.Senapati.RotationThreshold <= 0 || c.Senapati.RotationThreshold > 1:
 		return fmt.Errorf("senapati.rotationThreshold must be between 0 and 1")
 	}
+	if c.Workspace != "" {
+		if st, err := os.Stat(c.Workspace); err != nil || !st.IsDir() {
+			return fmt.Errorf("workspace %q is not a directory", c.Workspace)
+		}
+		if c.Sainik.Directory != "" && !Within(c.Workspace, c.Sainik.Directory) {
+			return fmt.Errorf("sainik.directory %q must be inside workspace %q", c.Sainik.Directory, c.Workspace)
+		}
+	}
 	// opencode names a model provider/id; Claude Code by its id alone.
 	if c.Harness != "claude" {
 		if c.Sainik.DefaultModel != "" && !isModelRef(c.Sainik.DefaultModel) {
@@ -239,6 +251,12 @@ func (c Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+// Within reports whether path is dir or inside it.
+func Within(dir, path string) bool {
+	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(path))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, "../") && !filepath.IsAbs(rel)
 }
 
 func isModelRef(s string) bool {
