@@ -1,5 +1,5 @@
 {
   "name": "samrajya",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Feeds Samrajya's Linear pings into a native Claude Code main session and keeps its tasks and action journal in mahamantri"
 }

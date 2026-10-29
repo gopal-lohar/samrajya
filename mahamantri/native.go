@@ -59,7 +59,7 @@ func runNative(cfg config.Config, logger *log.Logger) error {
 		}
 	}
 	base := httpURL(bridgeLn.Addr().String())
-	if err := writeDiscovery(cfg.Native.DiscoveryFile, base, token); err != nil {
+	if err := writeDiscovery(cfg.Native.DiscoveryFile, base, token, cfg.Native.MainDirectory); err != nil {
 		return fmt.Errorf("native.discoveryFile %s: %w", cfg.Native.DiscoveryFile, err)
 	}
 	defer os.Remove(cfg.Native.DiscoveryFile)
@@ -111,13 +111,16 @@ func newToken() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// writeDiscovery tells the plugin where the bridge is and the token for this
-// run, readable only by this user.
-func writeDiscovery(path, url, token string) error {
+// writeDiscovery tells the plugin where the bridge is, the token for this
+// run and where the main session runs, readable only by this user.
+func writeDiscovery(path, url, token, mainDir string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	data, err := json.Marshal(map[string]any{"url": url, "token": token, "pid": os.Getpid()})
+	if real, err := filepath.EvalSymlinks(mainDir); err == nil {
+		mainDir = real
+	}
+	data, err := json.Marshal(map[string]any{"url": url, "token": token, "pid": os.Getpid(), "mainDirectory": mainDir})
 	if err != nil {
 		return err
 	}

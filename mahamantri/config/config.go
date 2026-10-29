@@ -44,6 +44,11 @@ type Config struct {
 		// a fresh token on every start, for the plugin to read. Default
 		// $XDG_STATE_HOME/samrajya/bridge.json (~/.local/state/...).
 		DiscoveryFile string `yaml:"discoveryFile"`
+		// MainDirectory is where the main session runs. Only a session in
+		// this directory attaches as the main one by itself; a session
+		// elsewhere that has the plugin loaded stays passive. Default: the
+		// workspace.
+		MainDirectory string `yaml:"mainDirectory"`
 		// TrustedUserIDs are the Linear users whose comments may ask for
 		// work. Others' pings still arrive, marked untrusted: information
 		// to check with a trusted person, not instructions. Empty: everyone
@@ -180,6 +185,9 @@ func Load(path string) (Config, error) {
 	if c.Native.DiscoveryFile == "" {
 		c.Native.DiscoveryFile = DefaultDiscoveryFile()
 	}
+	if c.Native.MainDirectory == "" {
+		c.Native.MainDirectory = c.Workspace
+	}
 	if c.Harness == "" {
 		c.Harness = "opencode"
 	}
@@ -215,7 +223,7 @@ func (c *Config) applyEnvFallbacks() {
 }
 
 func (c *Config) resolvePaths() {
-	for _, p := range []*string{&c.Attention.RegistryFile, &c.State.SenapatiFile, &c.State.LinearThreadsFile, &c.Senapati.InstructionsFile, &c.Claude.StateFile, &c.Workspace, &c.Sainik.Directory, &c.Brain, &c.Native.Store, &c.Native.DiscoveryFile} {
+	for _, p := range []*string{&c.Attention.RegistryFile, &c.State.SenapatiFile, &c.State.LinearThreadsFile, &c.Senapati.InstructionsFile, &c.Claude.StateFile, &c.Workspace, &c.Sainik.Directory, &c.Brain, &c.Native.Store, &c.Native.DiscoveryFile, &c.Native.MainDirectory} {
 		if *p != "" && !filepath.IsAbs(*p) {
 			*p = filepath.Join(c.Dir, *p)
 		}
@@ -319,6 +327,11 @@ func (c Config) validateNative() error {
 	if c.Workspace != "" {
 		if st, err := os.Stat(c.Workspace); err != nil || !st.IsDir() {
 			return fmt.Errorf("workspace %q is not a directory", c.Workspace)
+		}
+	}
+	if c.Native.MainDirectory != "" {
+		if st, err := os.Stat(c.Native.MainDirectory); err != nil || !st.IsDir() {
+			return fmt.Errorf("native.mainDirectory %q is not a directory", c.Native.MainDirectory)
 		}
 	}
 	return nil

@@ -107,14 +107,14 @@ class FakeBridge {
   }
 }
 
-async function setup(t: TestContext, opts: { start?: boolean; bridge?: FakeBridge } = {}) {
+async function setup(t: TestContext, opts: { start?: boolean; bridge?: FakeBridge; mainDirectory?: string } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'samrajya-channel-'));
   const discoveryPath = join(dir, 'bridge.json');
   const bridge = opts.bridge ?? new FakeBridge();
   await bridge.listen();
-  const writeDiscovery = () => writeFile(discoveryPath, JSON.stringify({ url: bridge.url, token: bridge.token }));
+  const writeDiscovery = () => writeFile(discoveryPath, JSON.stringify({ url: bridge.url, token: bridge.token, mainDirectory: opts.mainDirectory }));
   await writeDiscovery();
-  const channel = createChannel({ discoveryPath, pollSeconds: 1, heldRetryMs: 100, maxBackoffMs: 100 });
+  const channel = createChannel({ discoveryPath, directory: dir, pollSeconds: 1, heldRetryMs: 100, maxBackoffMs: 100 });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 'test', version: '0.0.1' });
   const notifications: Notification[] = [];
@@ -215,6 +215,32 @@ test('releases the attachment when it stops, so the next session attaches at onc
   await channel.stop();
   assert.ok(bridge.requests.some((r) => r.path === '/v1/detach' && r.attachment === 'att-1'));
   assert.equal(bridge.holderLive, false);
+});
+
+test('only a session in the main directory attaches by itself', async (t) => {
+  const bridge = new FakeBridge();
+  bridge.events.push(event('linear:c1', 1));
+  const { notifications, channel, call } = await setup(t, { bridge, mainDirectory: tmpdir() });
+  await until(() => channel.state === 'elsewhere', 'elsewhere state');
+  assert.equal(bridge.requests.filter((r) => r.path === '/v1/attach').length, 0);
+  assert.equal(notifications.length, 0);
+  assert.equal((await call('samrajya_take_over')).isError, undefined); // still possible when asked
+  await until(() => notifications.length === 1, 'delivery after explicit take over');
+});
+
+test('a session in the main directory attaches', async (t) => {
+  const bridge = new FakeBridge();
+  bridge.events.push(event('linear:c1', 1));
+  const dir = await mkdtemp(join(tmpdir(), 'samrajya-main-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const discoveryPath = join(dir, 'bridge.json');
+  await bridge.listen();
+  t.after(() => bridge.close());
+  await writeFile(discoveryPath, JSON.stringify({ url: bridge.url, token: bridge.token, mainDirectory: dir }));
+  const channel = createChannel({ discoveryPath, directory: dir, pollSeconds: 1, heldRetryMs: 100 });
+  t.after(() => channel.stop());
+  channel.start();
+  await until(() => bridge.requests.some((r) => r.path === '/v1/attach'), 'attach in main directory');
 });
 
 test('re-reads the discovery file after mahamantri restarts with a new token, without re-sending', async (t) => {

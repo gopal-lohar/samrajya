@@ -352,6 +352,9 @@ func TestNativeModeNeedsNoManagedSettings(t *testing.T) {
 	if !strings.HasSuffix(c.Native.DiscoveryFile, filepath.Join("samrajya", "bridge.json")) || !filepath.IsAbs(c.Native.DiscoveryFile) {
 		t.Errorf("discovery file = %q", c.Native.DiscoveryFile)
 	}
+	if c.Native.MainDirectory != "" {
+		t.Errorf("main directory without a workspace = %q", c.Native.MainDirectory)
+	}
 	if len(c.Native.TrustedUserIDs) != 1 {
 		t.Errorf("trusted = %v", c.Native.TrustedUserIDs)
 	}
@@ -374,5 +377,20 @@ func TestModeDefaultsToManaged(t *testing.T) {
 	c, err := Load(writeConfig(t, validYAML))
 	if err != nil || c.Mode != "managed" {
 		t.Errorf("mode = %q, %v", c.Mode, err)
+	}
+}
+
+func TestNativeMainDirectoryDefaultsToTheWorkspace(t *testing.T) {
+	path := writeConfig(t, nativeYAML+"workspace: ws\n")
+	os.Mkdir(filepath.Join(filepath.Dir(path), "ws"), 0o755)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Native.MainDirectory != filepath.Join(filepath.Dir(path), "ws") {
+		t.Errorf("main directory = %q", c.Native.MainDirectory)
+	}
+	if _, err := Load(writeConfig(t, nativeYAML+"  mainDirectory: /nonexistent/dir\n")); err == nil {
+		t.Error("a missing main directory was accepted")
 	}
 }

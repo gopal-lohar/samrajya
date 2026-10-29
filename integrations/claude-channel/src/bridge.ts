@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, realpath } from 'node:fs/promises';
 
 // Client for mahamantri's native bridge API (mahamantri/bridge). Mahamantri
 // writes its address and a fresh token to the discovery file on every
@@ -8,6 +8,8 @@ import { readFile } from 'node:fs/promises';
 export interface Discovery {
   url: string;
   token: string;
+  /** Where the main session runs; only a session there attaches by itself. */
+  mainDirectory?: string;
 }
 
 export class BridgeError extends Error {
@@ -34,7 +36,7 @@ export class Bridge {
       if (typeof d.url !== 'string' || typeof d.token !== 'string') {
         throw new BridgeError(0, `${this.discoveryPath} is not a bridge discovery file`);
       }
-      this.discovery = { url: d.url, token: d.token };
+      this.discovery = { url: d.url, token: d.token, mainDirectory: typeof d.mainDirectory === 'string' ? d.mainDirectory : undefined };
     }
     return this.discovery;
   }
@@ -74,6 +76,14 @@ export class Bridge {
     if (res.status === 401) this.reset();
     if (!res.ok) throw new BridgeError(res.status, json?.error ?? `bridge answered ${res.status}`, json);
     return json as T;
+  }
+
+  /** Whether a session in dir is the main one by mahamantri's configuration (any, if none is set). */
+  async isMainDirectory(dir: string): Promise<boolean> {
+    const main = (await this.locate()).mainDirectory;
+    if (!main) return true;
+    const real = async (p: string) => { try { return await realpath(p); } catch { return p; } };
+    return (await real(dir)) === (await real(main));
   }
 
   /** Attach as the main session. Returns false when another session holds it. */

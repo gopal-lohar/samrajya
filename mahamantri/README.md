@@ -37,6 +37,8 @@ reachable through Remote Control, with the Samrajya channel plugin
   Through it the plugin attaches as the main session, receives pending pings,
   which are replayed until accepted, accepts them into tasks, keeps tasks and
   the action journal up to date, and reads and writes the brain.
+- **One main session.** Only a session running in `native.mainDirectory`
+  (default: the workspace) attaches as the main session by itself.
 - **Trust.** `native.trustedUserIDs` lists the Linear users who may ask for
   work. Pings from anyone else still arrive, marked untrusted.
 

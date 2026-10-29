@@ -42,10 +42,12 @@ cd /path/to/your/workspace   # where the main session will run
 claude plugin install samrajya@samrajya --scope local
 ```
 
-Install it only where the main session runs. Every session that loads the
-plugin can attach as the main session, and the first one to do so holds the
-attachment. Claude Code doesn't tell a plugin whether its session enabled the
-channel, so a session elsewhere that loaded the plugin could take the slot.
+Only a session running in Mahamantri's `native.mainDirectory` (default: the
+workspace) attaches as the main session by itself. Claude Code doesn't tell a
+plugin whether its session enabled the channel, but the plugin runs in its
+session's directory, so a session elsewhere stays passive unless you tell it
+to take over. Installing with `--scope local` also keeps the plugin out of
+unrelated projects.
 
 Claude Code copies the plugin when installing it. After rebuilding, run
 `claude plugin update samrajya@samrajya` (bump the version in

@@ -22,7 +22,7 @@ After a restart or compaction, call samrajya_status first: it lists pending ping
 
 Samrajya's memory of the work is a set of short notes (samrajya_status shows their index). Before working on a project, read the notes that apply (samrajya_memory). When you learn something worth knowing next time - a person's standing instruction, a fact in neither the code nor Linear - save it with samrajya_remember; keep notes short and update one rather than adding near-duplicates.
 
-Project-specific rules (worktrees, dependencies, services, branches) live in the projects' own instruction files; follow them. If samrajya_status says another session is attached as the main one, do not take over unless the person tells you this session is now the main.`;
+Project-specific rules (worktrees, dependencies, services, branches) live in the projects' own instruction files; follow them. If samrajya_status says this session is not the main one (another is attached, or this one runs outside the main directory), do not take over unless the person tells you this session is now the main.`;
 
 export interface Event {
   id: string;
@@ -170,6 +170,8 @@ const tools = [
 
 export interface ChannelOptions {
   discoveryPath: string;
+  /** The session's directory (the plugin runs in it); default process.cwd(). */
+  directory?: string;
   clientName?: string;
   pollSeconds?: number;
   heldRetryMs?: number;
@@ -180,13 +182,13 @@ export function createChannel(opts: ChannelOptions) {
   const bridge = new Bridge(opts.discoveryPath);
   const client = opts.clientName ?? `claude-channel pid ${process.pid}`;
   const notified = new Set<string>();
-  let state: 'starting' | 'attached' | 'passive' | 'disconnected' = 'starting';
+  let state: 'starting' | 'attached' | 'passive' | 'elsewhere' | 'disconnected' = 'starting';
   let lastError = '';
   let stopped = false;
   let running: Promise<void> | undefined;
   const abort = new AbortController();
 
-  const mcp = new Server({ name: 'samrajya', version: '0.1.0' }, {
+  const mcp = new Server({ name: 'samrajya', version: '0.1.1' }, {
     capabilities: { experimental: { 'claude/channel': {} }, tools: {} },
     instructions,
   });
@@ -206,6 +208,13 @@ export function createChannel(opts: ChannelOptions) {
       let used = bridge.attachment;
       try {
         if (!bridge.attachment) {
+          // Every session with the plugin loaded runs this; only the one in
+          // the main directory may claim the main slot unasked.
+          if (!(await bridge.isMainDirectory(opts.directory ?? process.cwd()))) {
+            state = 'elsewhere';
+            await sleep(opts.heldRetryMs ?? 15000);
+            continue;
+          }
           if (!(await bridge.attach(client))) {
             state = 'passive';
             await sleep(opts.heldRetryMs ?? 15000);
