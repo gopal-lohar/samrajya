@@ -3,6 +3,7 @@ package bridge
 import (
 	"bytes"
 	"encoding/json"
+	"github.com/gopal-lohar/samrajya/mahamantri/brain"
 	"io"
 	"log"
 	"net/http"
@@ -184,5 +185,31 @@ func TestAPIErrorsAreExplicit(t *testing.T) {
 	}
 	if code, _ := c.do("POST", "/v1/actions/"+out["id"].(string), map[string]string{"status": "done", "ref": "cmt", "threadId": "th"}); code != http.StatusOK {
 		t.Errorf("resolve: %d", code)
+	}
+}
+
+func TestBrainIsServedReadableByAllWritableByTheMain(t *testing.T) {
+	store, _ := openStore(t)
+	mem, err := brain.Open(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(&Server{Store: store, Token: "tok", Brain: mem, Logger: log.New(io.Discard, "", 0)})
+	t.Cleanup(ts.Close)
+	main := &client{t: t, url: ts.URL, token: "tok"}
+	other := &client{t: t, url: ts.URL, token: "tok"}
+	note := map[string]string{"description": "Deploys need a heads-up", "body": "Tell the person before deploying."}
+	if code, _ := other.do("PUT", "/brain/deploys", note); code != http.StatusConflict {
+		t.Errorf("unattached write: %d", code)
+	}
+	main.attach(false)
+	if code, _ := main.do("PUT", "/brain/deploys", note); code != http.StatusCreated {
+		t.Fatalf("write: %d", code)
+	}
+	if code, out := other.do("GET", "/brain/deploys", nil); code != http.StatusOK || out["body"] != note["body"] {
+		t.Errorf("read: %d %v", code, out)
+	}
+	if _, st := other.do("GET", "/v1/status", nil); !strings.Contains(st["brainIndex"].(string), "Deploys need a heads-up") {
+		t.Errorf("status brain index = %v", st["brainIndex"])
 	}
 }

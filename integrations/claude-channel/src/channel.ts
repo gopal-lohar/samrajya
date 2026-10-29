@@ -20,6 +20,8 @@ Create a task (samrajya_create_task) for direct requests that span time, delegat
 
 After a restart or compaction, call samrajya_status first: it lists pending pings, open tasks and actions whose outcome was never recorded. An unresolved action may or may not have happened - check Linear before redoing it.
 
+Samrajya's memory of the work is a set of short notes (samrajya_status shows their index). Before working on a project, read the notes that apply (samrajya_memory). When you learn something worth knowing next time - a person's standing instruction, a fact in neither the code nor Linear - save it with samrajya_remember; keep notes short and update one rather than adding near-duplicates.
+
 Project-specific rules (worktrees, dependencies, services, branches) live in the projects' own instruction files; follow them. If samrajya_status says another session is attached as the main one, do not take over unless the person tells you this session is now the main.`;
 
 export interface Event {
@@ -135,6 +137,31 @@ const tools = [
     },
   },
   {
+    name: 'samrajya_memory',
+    description: "Samrajya's memory: without a name, list the notes; with one, read it.",
+    inputSchema: { type: 'object', properties: { name: str('Note to read') }, additionalProperties: false },
+  },
+  {
+    name: 'samrajya_remember',
+    description: 'Save or update a memory note (short: a standing instruction or a fact in neither the code nor Linear).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: str('kebab-case note name'),
+        description: str('One line saying what the note is about'),
+        project: str('Workspace project it applies to; omit for everywhere'),
+        body: str('The note'),
+      },
+      required: ['name', 'description', 'body'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'samrajya_forget',
+    description: 'Delete a memory note that is wrong or no longer useful.',
+    inputSchema: { type: 'object', properties: { name: str('Note to delete') }, required: ['name'], additionalProperties: false },
+  },
+  {
     name: 'samrajya_take_over',
     description: 'Make this session the main one, replacing the session attached now. Only when the person says this session is now the main.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
@@ -237,6 +264,13 @@ export function createChannel(opts: ChannelOptions) {
         return bridge.request('POST', '/v1/actions', { taskId: a.task_id, kind: a.kind, target: a.target, intent: a.intent });
       case 'samrajya_action_result':
         return bridge.request('POST', `/v1/actions/${encodeURIComponent(a.action_id)}`, { status: a.status, ref: a.ref, note: a.note, threadId: a.thread_id, issue: a.issue });
+      case 'samrajya_memory':
+        return a.name ? bridge.request('GET', `/brain/${encodeURIComponent(a.name)}`) : bridge.request('GET', '/brain');
+      case 'samrajya_remember':
+        return bridge.request('PUT', `/brain/${encodeURIComponent(a.name)}`, { description: a.description, project: a.project, body: a.body });
+      case 'samrajya_forget':
+        await bridge.request('DELETE', `/brain/${encodeURIComponent(a.name)}`);
+        return `Forgot ${a.name}.`;
       case 'samrajya_take_over':
         if (!(await bridge.attach(client, true))) throw new Error('take over refused');
         state = 'attached';

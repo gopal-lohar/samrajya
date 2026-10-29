@@ -157,7 +157,8 @@ test('declares a channel with the task tools and no permission relay', async (t)
   assert.deepEqual(client.getServerCapabilities()?.experimental, { 'claude/channel': {} });
   const names = (await client.listTools()).tools.map((x) => x.name);
   assert.deepEqual(names, ['samrajya_status', 'samrajya_accept', 'samrajya_create_task', 'samrajya_update_task',
-    'samrajya_tasks', 'samrajya_action_intent', 'samrajya_action_result', 'samrajya_take_over']);
+    'samrajya_tasks', 'samrajya_action_intent', 'samrajya_action_result', 'samrajya_memory', 'samrajya_remember',
+    'samrajya_forget', 'samrajya_take_over']);
   assert.match(client.getInstructions() ?? '', /You own outcomes/);
 });
 
@@ -185,6 +186,10 @@ test('tools send the attachment and map arguments; bridge errors come back as to
   const done = await call('samrajya_update_task', { task_id: 'T1', status: 'done' });
   assert.equal(done.isError, true);
   assert.match(JSON.stringify(done.content), /done only with a result/);
+  await call('samrajya_remember', { name: 'deploys', description: 'Deploy rule', body: 'Ask first.' });
+  const put = bridge.requests.find((r) => r.path === '/brain/deploys')!;
+  assert.equal(put.method, 'PUT');
+  assert.deepEqual(put.body, { description: 'Deploy rule', body: 'Ask first.' });
   await call('samrajya_action_result', { action_id: 'A1', status: 'done', ref: 'cmt-1', thread_id: 'th-1', issue: 'ENG-1' });
   assert.deepEqual(bridge.requests.find((r) => r.path === '/v1/actions/A1')!.body, { status: 'done', ref: 'cmt-1', threadId: 'th-1', issue: 'ENG-1' });
 });

@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gopal-lohar/samrajya/mahamantri/brain"
 	"github.com/gopal-lohar/samrajya/mahamantri/bridge"
 	"github.com/gopal-lohar/samrajya/mahamantri/config"
 	"github.com/gopal-lohar/samrajya/mahamantri/linear"
@@ -52,6 +53,11 @@ func runNative(cfg config.Config, logger *log.Logger) error {
 		return err
 	}
 	srv := &bridge.Server{Store: store, Token: token, Logger: logger}
+	if cfg.Brain != "" {
+		if srv.Brain, err = brain.Open(cfg.Brain, func() []string { return projects(cfg.Workspace) }); err != nil {
+			return fmt.Errorf("brain %s: %w", cfg.Brain, err)
+		}
+	}
 	base := httpURL(bridgeLn.Addr().String())
 	if err := writeDiscovery(cfg.Native.DiscoveryFile, base, token); err != nil {
 		return fmt.Errorf("native.discoveryFile %s: %w", cfg.Native.DiscoveryFile, err)

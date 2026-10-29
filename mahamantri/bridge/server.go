@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gopal-lohar/samrajya/mahamantri/brain"
 	"github.com/gopal-lohar/samrajya/mahamantri/linear"
 )
 
@@ -36,6 +37,9 @@ type Server struct {
 	Store  *Store
 	Token  string
 	Logger *log.Logger
+	// Brain, if set, is served under /brain (see brain.Routes): any client
+	// may read it, only the attached one change it.
+	Brain *brain.Store
 
 	mu       sync.Mutex
 	holder   string // attachment id
@@ -44,6 +48,7 @@ type Server struct {
 	lastSeen time.Time
 	wake     chan struct{} // closed and replaced whenever an event is stored
 	now      func() time.Time
+	brainMux *http.ServeMux
 }
 
 func (s *Server) init() {
@@ -52,6 +57,10 @@ func (s *Server) init() {
 	}
 	if s.now == nil {
 		s.now = time.Now
+	}
+	if s.Brain != nil && s.brainMux == nil {
+		s.brainMux = http.NewServeMux()
+		brain.Routes(s.brainMux, s.Brain)
 	}
 }
 
@@ -98,6 +107,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequest)
 
 	path := strings.TrimSuffix(r.URL.Path, "/")
+	if path == "/brain" || strings.HasPrefix(path, "/brain/") {
+		switch {
+		case s.brainMux == nil:
+			writeErr(w, http.StatusNotFound, "no brain configured (brain: in mahamantri's config)")
+		case r.Method == http.MethodGet:
+			s.brainMux.ServeHTTP(w, r)
+		default:
+			s.withHolder(w, r, s.brainMux.ServeHTTP)
+		}
+		return
+	}
 	switch {
 	case r.Method == http.MethodPost && path == "/v1/attach":
 		s.attach(w, r)
@@ -210,7 +230,11 @@ func (s *Server) status(w http.ResponseWriter) {
 	s.mu.Lock()
 	a := s.attachment()
 	s.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{"attached": a, "recovery": rec})
+	out := map[string]any{"attached": a, "recovery": rec}
+	if s.Brain != nil {
+		out["brainIndex"] = s.Brain.Index()
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // events long-polls for pending events after a sequence number. The wake
