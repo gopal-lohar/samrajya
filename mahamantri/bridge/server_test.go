@@ -107,6 +107,18 @@ func TestOnlyTheAttachedSessionMayReadOrChangeState(t *testing.T) {
 		t.Errorf("the replaced session still reads the feed: %d", code)
 	}
 
+	// A holder that detaches frees the attachment at once.
+	if code, _ := other.do("POST", "/v1/detach", nil); code != http.StatusOK {
+		t.Fatalf("detach: %d", code)
+	}
+	if code, _ := other.do("GET", "/v1/events?wait=0", nil); code != http.StatusConflict {
+		t.Errorf("a detached session still reads the feed: %d", code)
+	}
+	if main.attach(false) != http.StatusOK {
+		t.Fatal("could not attach after the holder detached")
+	}
+	other.attach(true)
+
 	// A holder that went quiet can be replaced without takeover.
 	s.mu.Lock()
 	s.lastSeen = time.Now().Add(-2 * attachTTL)

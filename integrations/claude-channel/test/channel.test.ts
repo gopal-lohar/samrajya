@@ -87,6 +87,11 @@ class FakeBridge {
       if (held()) return send(409, { error: 'replaced' });
       return send(200, { events: this.pendingAfter(after) });
     }
+    if (url.pathname === '/v1/detach') {
+      this.holder = '';
+      this.holderLive = false;
+      return send(200, { detached: true });
+    }
     if (url.pathname === '/v1/accept') {
       for (const id of body.events) this.events = this.events.filter((e) => e.id !== id);
       return send(200, { id: 'T1', status: 'queued' });
@@ -197,6 +202,14 @@ test('stays passive while another session is attached, until it takes over', asy
   assert.equal(notifications.length, 0);
   assert.equal((await call('samrajya_take_over')).isError, undefined);
   await until(() => notifications.length === 1, 'delivery after take over');
+});
+
+test('releases the attachment when it stops, so the next session attaches at once', async (t) => {
+  const { bridge, channel } = await setup(t);
+  await until(() => channel.state === 'attached', 'attach');
+  await channel.stop();
+  assert.ok(bridge.requests.some((r) => r.path === '/v1/detach' && r.attachment === 'att-1'));
+  assert.equal(bridge.holderLive, false);
 });
 
 test('re-reads the discovery file after mahamantri restarts with a new token, without re-sending', async (t) => {

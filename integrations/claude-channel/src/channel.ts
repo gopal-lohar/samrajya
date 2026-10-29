@@ -181,7 +181,7 @@ export function createChannel(opts: ChannelOptions) {
         if (!bridge.attachment) {
           if (!(await bridge.attach(client))) {
             state = 'passive';
-            await sleep(opts.heldRetryMs ?? 60000);
+            await sleep(opts.heldRetryMs ?? 15000);
             continue;
           }
           state = 'attached';
@@ -268,6 +268,10 @@ export function createChannel(opts: ChannelOptions) {
       stopped = true;
       abort.abort();
       await running;
+      if (bridge.attachment) {
+        // Let the next session attach at once instead of after the bridge's timeout.
+        await bridge.request('POST', '/v1/detach', undefined, AbortSignal.timeout(2000)).catch(() => {});
+      }
       await mcp.close();
     },
   };

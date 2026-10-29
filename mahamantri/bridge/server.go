@@ -101,6 +101,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodPost && path == "/v1/attach":
 		s.attach(w, r)
+	case r.Method == http.MethodPost && path == "/v1/detach":
+		s.withHolder(w, r, s.detach)
 	case r.Method == http.MethodGet && path == "/v1/status":
 		s.status(w)
 	case r.Method == http.MethodGet && path == "/v1/events":
@@ -171,6 +173,16 @@ func (s *Server) attach(w http.ResponseWriter, r *http.Request) {
 	s.lastSeen = s.now()
 	s.Logger.Printf("bridge: %q attached (generation %d, takeover %v)", body.Client, s.gen, body.Takeover)
 	writeJSON(w, http.StatusOK, map[string]any{"attachment": s.holder, "generation": s.gen})
+}
+
+// detach releases the attachment, so the next session attaches at once
+// rather than after attachTTL. The plugin calls it when its session ends.
+func (s *Server) detach(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Logger.Printf("bridge: %q detached (generation %d)", s.client, s.gen)
+	s.holder, s.client = "", ""
+	writeJSON(w, http.StatusOK, map[string]any{"detached": true})
 }
 
 func (s *Server) withHolder(w http.ResponseWriter, r *http.Request, next http.HandlerFunc) {
