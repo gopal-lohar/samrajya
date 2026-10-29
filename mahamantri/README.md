@@ -21,6 +21,44 @@ attention registry/broadcaster/HTTP API) and a Linear webhook receiver
 (signature/timestamp verification, full-payload logging), whose code now lives
 in the `opencode/`, `attention/` and `linear/` packages here.
 
+## Native mode
+
+With `mode: native`, mahamantri runs no Senapati session, sainiks or TUI. Your
+main assistant is an interactive Claude Code session that you start yourself,
+reachable through Remote Control, with the Samrajya channel plugin
+(`../integrations/claude-channel`). Mahamantri is its bridge:
+
+- **Durable Linear ingress.** A ping is acknowledged to Linear only after it is
+  stored, in `native.store`, a bbolt file locked against a second mahamantri.
+  Otherwise the webhook answers 503 and Linear redelivers. Redeliveries are
+  kept once.
+- **A local bridge API** on `native.listenAddr` (loopback only), authenticated
+  with a token mahamantri writes, fresh on every start, to `native.discoveryFile`.
+  Through it the plugin attaches as the main session, receives pending pings,
+  which are replayed until accepted, accepts them into tasks, keeps tasks and
+  the action journal up to date, and reads and writes the brain.
+- **Trust.** `native.trustedUserIDs` lists the Linear users who may ask for
+  work. Pings from anyone else still arrive, marked untrusted.
+
+```yaml
+mode: native
+workspace: "../repos"
+brain: "../brain"
+linear:
+  signingSecret: ""      # or LINEAR_SIGNING_SECRET
+  listenAddr: ":8080"
+  botUserID: "<the bot user's Linear id>"
+  botHandle: "<what comments @-mention it as>"
+native:
+  trustedUserIDs: ["<your Linear user id>"]
+```
+
+Native mode ignores the managed settings (`harness`, `opencode`, `attention`,
+`senapati`, models). Threads known from managed mode's `state.linearThreadsFile`
+are imported once. Ctrl+C stops mahamantri only, not your session; pings that
+arrive meanwhile wait for Linear's redelivery, and pings already stored wait
+in the inbox.
+
 ## Run
 
 ```sh

@@ -1,6 +1,18 @@
 # Relative paths below resolve against the directory containing this file,
 # not the directory you launch mahamantri from.
 
+# How Senapati runs: "managed" (the default: mahamantri runs it and its
+# sainiks on the harness below, with the TUI) or "native" (your own interactive
+# Claude Code session with the Samrajya channel plugin does the work, and
+# mahamantri keeps the durable inbox, tasks and brain for it - see the README's
+# "Native mode"; only linear, workspace, brain and native apply then).
+mode: managed
+native:
+  listenAddr: "127.0.0.1:4098"    # the bridge API for the plugin; loopback only
+  store: mahamantri-native.db
+  # discoveryFile: ""            # default $XDG_STATE_HOME/samrajya/bridge.json
+  trustedUserIDs: []             # Linear users who may ask for work; empty = everyone
+
 # What sessions run on: "claude" (Claude Code, run by mahamantri; uses your
 # Claude subscription and whatever your Claude Code setup routes to) or
 # "opencode" (an already-running `opencode serve`, configured below).

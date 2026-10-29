@@ -11,9 +11,15 @@ Opinionated Agentic AI framework to manage agentic workflows with Claude Code or
 - `senapati/` - Senapati's role instructions (`senapati.md`), sent to it as its
   briefing by mahamantri.
 
-## Native Claude migration experiment
+## Native mode
 
-`integrations/claude-channel/` contains an isolated, synthetic MCP channel probe
-for testing interactive Claude Code with Remote Control. It is not connected to
-live Linear ingress or the managed runtime. See its README for the feasibility
-gates and limitations; the existing Claude/opencode backends remain unchanged.
+Instead of a manager agent routing work to sainiks, the main assistant can be an
+ordinary interactive Claude Code session. It runs on your Claude subscription,
+you can reach it from the terminal or your phone through Remote Control, and it
+does the work itself. In this mode (`mode: native`), mahamantri keeps a durable
+inbox of Linear pings, the tasks they become, a journal of external actions,
+and the brain. The Samrajya channel plugin
+(`integrations/claude-channel/`) feeds pings into the session and gives it tools
+for that state. See the plugin's README to set it up, and mahamantri's README
+for the configuration. Managed mode stays the default and keeps full Claude
+Code and opencode support.
