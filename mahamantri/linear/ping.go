@@ -115,6 +115,15 @@ type Ping struct {
 	Author     string
 	Body       string
 	URL        string
+
+	// What identifies the comment for good, where the fields above are for
+	// reading: a durable inbox deduplicates on CommentID and replies in
+	// ThreadID (the thread's top comment; the comment itself if it starts
+	// one).
+	IssueID   string
+	CommentID string
+	ThreadID  string
+	AuthorID  string
 }
 
 // Classify decides what a webhook delivery is to Senapati. Only two things
@@ -145,6 +154,10 @@ func Classify(eventType string, body []byte, self Identity, threads ThreadIndex)
 		Author:     firstNonEmpty(d.User.Name, env.Actor.Name, "someone"),
 		Body:       d.Body,
 		URL:        env.URL,
+		IssueID:    d.IssueID,
+		CommentID:  d.ID,
+		ThreadID:   firstNonEmpty(d.ParentID, d.ID),
+		AuthorID:   firstNonEmpty(d.User.ID, d.UserID, env.Actor.ID),
 	}
 	switch {
 	case self.mentionedIn(d.Body):

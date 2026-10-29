@@ -109,7 +109,7 @@ func TestHandlerForwardsReplyInSenapatisThreadAcrossRestart(t *testing.T) {
 		t.Fatalf("Senapati's own comment was forwarded: %q", f.got)
 	}
 
-	reloaded, err := LoadThreads(h.Threads.path)
+	reloaded, err := LoadThreads(h.Threads.(*Threads).path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,6 +125,8 @@ func TestHandlerForwardsReplyInSenapatisThreadAcrossRestart(t *testing.T) {
 	}
 }
 
+// Legacy (Forward) path only: a durable Sink must not acknowledge what it
+// failed to keep - see TestDurableSinkFailureAsksLinearToRetry.
 func TestHandlerStillRespondsOKWhenForwardFails(t *testing.T) {
 	f := &fakeForwarder{err: errors.New("queue full")}
 	var logs bytes.Buffer
@@ -134,5 +136,70 @@ func TestHandlerStillRespondsOKWhenForwardFails(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "queue full") {
 		t.Error("forward failure should be logged")
+	}
+}
+
+type fakeSink struct {
+	got []Ping
+	err error
+}
+
+func (f *fakeSink) Ingest(p Ping, delivery string) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.got = append(f.got, p)
+	return nil
+}
+
+type failingThreads struct{ threadSet }
+
+func (failingThreads) Add(string, string) error { return errors.New("disk full") }
+
+func TestDurableSinkRecordsThePingWithItsIdentity(t *testing.T) {
+	s := &fakeSink{}
+	var logs bytes.Buffer
+	h := newHandler(t, &fakeForwarder{}, &logs)
+	h.Sink = s
+	if rec := deliver(t, h, "s3cret", mentionBody, nil); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if len(s.got) != 1 {
+		t.Fatalf("ingested = %v", s.got)
+	}
+	p := s.got[0]
+	if p.CommentID != "c-1" || p.ThreadID != "c-1" || p.AuthorID != personID || p.Kind != "mention" {
+		t.Errorf("ping = %+v", p)
+	}
+	if strings.Contains(logs.String(), "pick this up") {
+		t.Error("the durable path must not log comment bodies")
+	}
+}
+
+func TestDurableSinkFailureAsksLinearToRetry(t *testing.T) {
+	h := newHandler(t, &fakeForwarder{}, &bytes.Buffer{})
+	h.Sink = &fakeSink{err: errors.New("store closed")}
+	if rec := deliver(t, h, "s3cret", mentionBody, nil); rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503 so Linear redelivers", rec.Code)
+	}
+}
+
+func TestDurableSinkRetriesWhenItsOwnThreadCannotBeLearned(t *testing.T) {
+	h := newHandler(t, &fakeForwarder{}, &bytes.Buffer{})
+	h.Sink = &fakeSink{}
+	h.Threads = failingThreads{threadSet{}}
+	if rec := deliver(t, h, "s3cret", ownCommentBody, nil); rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d: a reply in this thread would later be missed", rec.Code)
+	}
+}
+
+func TestDurableSinkReplyInLearnedThread(t *testing.T) {
+	s := &fakeSink{}
+	h := newHandler(t, &fakeForwarder{}, &bytes.Buffer{})
+	h.Sink = s
+	deliver(t, h, "s3cret", ownCommentBody, nil)
+	deliver(t, h, "s3cret", replyBody(ownCommentID), nil)
+	if len(s.got) != 1 || s.got[0].Kind != "reply" || s.got[0].ThreadID != ownCommentID {
+		t.Errorf("ingested = %+v", s.got)
 	}
 }
