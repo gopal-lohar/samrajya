@@ -10,3 +10,10 @@ Opinionated Agentic AI framework to manage agentic workflows with Claude Code or
   (`harness: opencode`). See its README.
 - `senapati/` - Senapati's role instructions (`senapati.md`), sent to it as its
   briefing by mahamantri.
+
+## Native Claude migration experiment
+
+`integrations/claude-channel/` contains an isolated, synthetic MCP channel probe
+for testing interactive Claude Code with Remote Control. It is not connected to
+live Linear ingress or the managed runtime. See its README for the feasibility
+gates and limitations; the existing Claude/opencode backends remain unchanged.
