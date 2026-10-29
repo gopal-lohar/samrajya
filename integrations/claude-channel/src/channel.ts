@@ -192,7 +192,7 @@ export function createChannel(opts: ChannelOptions) {
   let running: Promise<void> | undefined;
   const abort = new AbortController();
 
-  const mcp = new Server({ name: 'samrajya', version: '0.1.1' }, {
+  const mcp = new Server({ name: 'samrajya', version: '0.1.2' }, {
     capabilities: { experimental: { 'claude/channel': {} }, tools: {} },
     instructions,
   });
