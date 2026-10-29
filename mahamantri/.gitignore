@@ -4,3 +4,4 @@ mahamantri.yaml.*
 !mahamantri.yaml.example
 mahamantri.log
 mahamantri-*.json
+mahamantri-*.db
