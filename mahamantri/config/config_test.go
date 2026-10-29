@@ -325,3 +325,54 @@ func TestProjectOf(t *testing.T) {
 		t.Error("no workspace: no project")
 	}
 }
+
+const nativeYAML = `
+mode: native
+linear:
+  signingSecret: s
+  listenAddr: ":8080"
+  botUserID: bot
+  botHandle: senapati
+native:
+  trustedUserIDs: [u-owner]
+`
+
+// Native mode needs Linear and the bridge, not the managed harness: no
+// opencode server, registry, Senapati state or rotation settings.
+func TestNativeModeNeedsNoManagedSettings(t *testing.T) {
+	path := writeConfig(t, nativeYAML)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(path)
+	if c.Mode != "native" || c.Native.ListenAddr != "127.0.0.1:4098" || c.Native.Store != filepath.Join(dir, "mahamantri-native.db") {
+		t.Errorf("defaults: %+v", c.Native)
+	}
+	if !strings.HasSuffix(c.Native.DiscoveryFile, filepath.Join("samrajya", "bridge.json")) || !filepath.IsAbs(c.Native.DiscoveryFile) {
+		t.Errorf("discovery file = %q", c.Native.DiscoveryFile)
+	}
+	if len(c.Native.TrustedUserIDs) != 1 {
+		t.Errorf("trusted = %v", c.Native.TrustedUserIDs)
+	}
+}
+
+func TestNativeModeValidation(t *testing.T) {
+	for name, yaml := range map[string]string{
+		"no linear secret": strings.Replace(nativeYAML, "signingSecret: s", "signingSecret: \"\"", 1),
+		"public bridge":    nativeYAML + "  listenAddr: \":4098\"\n",
+		"unknown mode":     strings.Replace(nativeYAML, "mode: native", "mode: hybrid", 1),
+	} {
+		t.Setenv("LINEAR_SIGNING_SECRET", "")
+		if _, err := Load(writeConfig(t, yaml)); err == nil {
+			t.Errorf("%s: loaded", name)
+		}
+	}
+}
+
+func TestModeDefaultsToManaged(t *testing.T) {
+	c, err := Load(writeConfig(t, validYAML))
+	if err != nil || c.Mode != "managed" {
+		t.Errorf("mode = %q, %v", c.Mode, err)
+	}
+}

@@ -531,6 +531,7 @@ func (s *Store) Recovery() (Recovery, error) {
 			return nil
 		})
 	})
+	r.Pending, r.Open, r.Uncertain = nonNil(r.Pending), nonNil(r.Open), nonNil(r.Uncertain)
 	return r, err
 }
 

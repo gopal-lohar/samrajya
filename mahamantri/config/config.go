@@ -25,6 +25,31 @@ type ModelPolicy struct {
 }
 
 type Config struct {
+	// Mode is how Senapati runs: "managed" (default) - mahamantri runs it
+	// and its sainiks on the harness below, with the TUI - or "native": an
+	// interactive Claude Code session you start yourself (reachable through
+	// Remote Control) does the work, and mahamantri only keeps the durable
+	// inbox, tasks and action journal and feeds Linear pings to it through
+	// the Samrajya channel plugin. See Native.
+	Mode string `yaml:"mode"`
+	// Native configures native mode.
+	Native struct {
+		// ListenAddr is the bridge API the channel plugin talks to.
+		// Loopback only. Default 127.0.0.1:4098.
+		ListenAddr string `yaml:"listenAddr"`
+		// Store is the bridge's database. Default mahamantri-native.db next
+		// to the config.
+		Store string `yaml:"store"`
+		// DiscoveryFile is where mahamantri writes the bridge's address and
+		// a fresh token on every start, for the plugin to read. Default
+		// $XDG_STATE_HOME/samrajya/bridge.json (~/.local/state/...).
+		DiscoveryFile string `yaml:"discoveryFile"`
+		// TrustedUserIDs are the Linear users whose comments may ask for
+		// work. Others' pings still arrive, marked untrusted: information
+		// to check with a trusted person, not instructions. Empty: everyone
+		// is trusted.
+		TrustedUserIDs []string `yaml:"trustedUserIDs"`
+	} `yaml:"native"`
 	// Harness is what sessions run on: "opencode" (an opencode server) or
 	// "claude" (Claude Code, run by mahamantri). Empty means opencode.
 	Harness string `yaml:"harness"`
@@ -143,6 +168,18 @@ func Load(path string) (Config, error) {
 	if c.State.LinearThreadsFile == "" {
 		c.State.LinearThreadsFile = "mahamantri-linear-threads.json"
 	}
+	if c.Mode == "" {
+		c.Mode = "managed"
+	}
+	if c.Native.ListenAddr == "" {
+		c.Native.ListenAddr = "127.0.0.1:4098"
+	}
+	if c.Native.Store == "" {
+		c.Native.Store = "mahamantri-native.db"
+	}
+	if c.Native.DiscoveryFile == "" {
+		c.Native.DiscoveryFile = DefaultDiscoveryFile()
+	}
 	if c.Harness == "" {
 		c.Harness = "opencode"
 	}
@@ -178,14 +215,32 @@ func (c *Config) applyEnvFallbacks() {
 }
 
 func (c *Config) resolvePaths() {
-	for _, p := range []*string{&c.Attention.RegistryFile, &c.State.SenapatiFile, &c.State.LinearThreadsFile, &c.Senapati.InstructionsFile, &c.Claude.StateFile, &c.Workspace, &c.Sainik.Directory, &c.Brain} {
+	for _, p := range []*string{&c.Attention.RegistryFile, &c.State.SenapatiFile, &c.State.LinearThreadsFile, &c.Senapati.InstructionsFile, &c.Claude.StateFile, &c.Workspace, &c.Sainik.Directory, &c.Brain, &c.Native.Store, &c.Native.DiscoveryFile} {
 		if *p != "" && !filepath.IsAbs(*p) {
 			*p = filepath.Join(c.Dir, *p)
 		}
 	}
 }
 
+// DefaultDiscoveryFile is where native mode tells the channel plugin how to
+// reach it, unless configured otherwise.
+func DefaultDiscoveryFile() string {
+	dir := os.Getenv("XDG_STATE_HOME")
+	if dir == "" {
+		home, _ := os.UserHomeDir()
+		dir = filepath.Join(home, ".local", "state")
+	}
+	return filepath.Join(dir, "samrajya", "bridge.json")
+}
+
 func (c Config) Validate() error {
+	switch c.Mode {
+	case "managed":
+	case "native":
+		return c.validateNative()
+	default:
+		return fmt.Errorf("mode %q must be \"managed\" or \"native\"", c.Mode)
+	}
 	switch c.Harness {
 	case "opencode", "":
 		u, err := url.Parse(c.Opencode.ServerURL)
@@ -204,18 +259,10 @@ func (c Config) Validate() error {
 	default:
 		return fmt.Errorf("harness %q must be \"opencode\" or \"claude\"", c.Harness)
 	}
+	if err := c.validateLinear(); err != nil {
+		return err
+	}
 	switch {
-	case c.Linear.SigningSecret == "":
-		return fmt.Errorf("linear.signingSecret is required (or set LINEAR_SIGNING_SECRET)")
-	case c.Linear.ListenAddr == "":
-		return fmt.Errorf("linear.listenAddr is required")
-	case c.Linear.BotUserID == "":
-		return fmt.Errorf("linear.botUserID is required: Senapati's own Linear user id. Without it its own comments " +
-			"come back to it as pings and replies to it can't be recognised. It is actor.id on any comment Senapati " +
-			"made, in mahamantri.log")
-	case c.Linear.BotHandle == "":
-		return fmt.Errorf("linear.botHandle is required: what comments @-mention Senapati as (the part after the @), " +
-			"or no mention would ever reach it")
 	case c.Attention.ListenAddr == "":
 		return fmt.Errorf("attention.listenAddr is required")
 	case !loopback(c.Attention.ListenAddr):
@@ -258,6 +305,42 @@ func (c Config) Validate() error {
 
 // ProjectOf is the workspace project dir belongs to - the first directory
 // below the workspace - or "" if dir is the workspace itself or outside it.
+
+// validateNative checks what native mode uses: Linear, the bridge and the
+// brain/workspace paths - not the managed harness, registry or Senapati
+// settings, which it ignores.
+func (c Config) validateNative() error {
+	if err := c.validateLinear(); err != nil {
+		return err
+	}
+	if !loopback(c.Native.ListenAddr) {
+		return fmt.Errorf("native.listenAddr %q must be a loopback address such as 127.0.0.1:4098", c.Native.ListenAddr)
+	}
+	if c.Workspace != "" {
+		if st, err := os.Stat(c.Workspace); err != nil || !st.IsDir() {
+			return fmt.Errorf("workspace %q is not a directory", c.Workspace)
+		}
+	}
+	return nil
+}
+
+func (c Config) validateLinear() error {
+	switch {
+	case c.Linear.SigningSecret == "":
+		return fmt.Errorf("linear.signingSecret is required (or set LINEAR_SIGNING_SECRET)")
+	case c.Linear.ListenAddr == "":
+		return fmt.Errorf("linear.listenAddr is required")
+	case c.Linear.BotUserID == "":
+		return fmt.Errorf("linear.botUserID is required: Senapati's own Linear user id. Without it its own comments " +
+			"come back to it as pings and replies to it can't be recognised. It is actor.id on any comment Senapati " +
+			"made, in mahamantri.log")
+	case c.Linear.BotHandle == "":
+		return fmt.Errorf("linear.botHandle is required: what comments @-mention Senapati as (the part after the @), " +
+			"or no mention would ever reach it")
+	}
+	return nil
+}
+
 func ProjectOf(workspace, dir string) string {
 	if workspace == "" || !Within(workspace, dir) {
 		return ""

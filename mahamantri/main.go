@@ -78,6 +78,12 @@ func run(configPath string) error {
 	defer logFile.Close()
 	logger := log.New(logFile, "", log.LstdFlags)
 
+	// Native mode shares only the config and the log with managed mode: it
+	// must not create, rotate or shut down a Senapati session.
+	if cfg.Mode == "native" {
+		return runNative(cfg, logger)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
