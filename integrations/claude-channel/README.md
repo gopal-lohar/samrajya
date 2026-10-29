@@ -38,8 +38,14 @@ Requires Node 24+ on `PATH` and pnpm.
 pnpm --dir integrations/claude-channel install --frozen-lockfile --ignore-scripts
 pnpm --dir integrations/claude-channel bundle     # builds plugin/server.mjs
 claude plugin marketplace add /absolute/path/to/samrajya/integrations
-claude plugin install samrajya@samrajya
+cd /path/to/your/workspace   # where the main session will run
+claude plugin install samrajya@samrajya --scope local
 ```
+
+Install it only where the main session runs. Every session that loads the
+plugin can attach as the main session, and the first one to do so holds the
+attachment. Claude Code doesn't tell a plugin whether its session enabled the
+channel, so a session elsewhere that loaded the plugin could take the slot.
 
 Claude Code copies the plugin when installing it. After rebuilding, run
 `claude plugin update samrajya@samrajya` (bump the version in
