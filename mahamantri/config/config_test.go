@@ -1,396 +1,125 @@
 package config
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
-const validYAML = `
-opencode:
-  serverURL: http://localhost:4096
-  password: secret-pw
+const claudeYAML = `
 linear:
-  signingSecret: lin_wh_test
-  listenAddr: ":45821"
-  botUserID: "11111111-2222-4333-8444-555555555555"
-  botHandle: "senapati-bot"
-attention:
-  listenAddr: "127.0.0.1:4097"
-  registryFile: "./registry.json"
-state:
-  senapatiFile: "./senapati.json"
-senapati:
-  rotationThreshold: 0.4
+  signingSecret: s
+  listenAddr: ":8080"
+  botUserID: bot
+  botHandle: senapati
+bridge:
+  trustedUserIDs: [u-owner]
+`
+
+const opencodeYAML = `
+mode: opencode
+opencode:
+  serverURL: http://127.0.0.1:4096
+  password: pw
+  model: {providerID: acme, id: big}
+linear:
+  signingSecret: s
+  listenAddr: ":8080"
+  botUserID: bot
+  botHandle: senapati
 `
 
 func writeConfig(t *testing.T, contents string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "mahamantri.yaml")
-	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return path
 }
 
-func TestLoadValidConfig(t *testing.T) {
-	c, err := Load(writeConfig(t, validYAML))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if c.Opencode.ServerURL != "http://localhost:4096" || c.Senapati.RotationThreshold != 0.4 {
-		t.Errorf("Load() = %+v", c)
-	}
-}
-
-// Regression: state/registry/log used to resolve against the launch
-// directory, so running from anywhere else silently created a new Senapati.
-func TestRelativePathsResolveAgainstConfigDirNotCwd(t *testing.T) {
-	path := writeConfig(t, validYAML)
-	dir := filepath.Dir(path)
-	t.Chdir(t.TempDir())
-
-	c, err := Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := filepath.Join(dir, "senapati.json"); c.State.SenapatiFile != want {
-		t.Errorf("senapatiFile = %q, want %q", c.State.SenapatiFile, want)
-	}
-	if want := filepath.Join(dir, "registry.json"); c.Attention.RegistryFile != want {
-		t.Errorf("registryFile = %q, want %q", c.Attention.RegistryFile, want)
-	}
-	if want := filepath.Join(dir, "mahamantri.log"); c.LogFile() != want {
-		t.Errorf("LogFile() = %q, want %q", c.LogFile(), want)
-	}
-}
-
-func TestAbsolutePathsAreLeftAlone(t *testing.T) {
-	c, err := Load(writeConfig(t, strings.Replace(validYAML, `"./senapati.json"`, `"/var/lib/mm/senapati.json"`, 1)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if c.State.SenapatiFile != "/var/lib/mm/senapati.json" {
-		t.Errorf("senapatiFile = %q", c.State.SenapatiFile)
-	}
-}
-
-func TestUnknownKeyIsRejectedNotSilentlyIgnored(t *testing.T) {
-	typo := strings.Replace(validYAML, "rotationThreshold", "rotationThreshhold", 1)
-	if _, err := Load(writeConfig(t, typo)); err == nil {
-		t.Error("a misspelled key should fail loudly")
-	}
-}
-
-func TestLoadMissingRequiredFieldFails(t *testing.T) {
-	if _, err := Load(writeConfig(t, "opencode:\n  serverURL: http://localhost:4096\n  password: pw\n")); err == nil {
-		t.Error("Load() with missing required fields should fail validation")
-	}
-}
-
-func TestServerURLMustBeAURL(t *testing.T) {
-	bad := strings.Replace(validYAML, "http://localhost:4096", "localhost:4096", 1)
-	if _, err := Load(writeConfig(t, bad)); err == nil {
-		t.Error("a serverURL without a scheme should be rejected")
-	}
-}
-
-func TestEnvFallbackFillsEmptySecrets(t *testing.T) {
-	t.Setenv("OPENCODE_SERVER_PASSWORD", "from-env")
-	t.Setenv("LINEAR_SIGNING_SECRET", "also-from-env")
-	y := strings.NewReplacer("  password: secret-pw\n", "", "  signingSecret: lin_wh_test\n", "").Replace(validYAML)
-	c, err := Load(writeConfig(t, y))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if c.Opencode.Password != "from-env" || c.Linear.SigningSecret != "also-from-env" {
-		t.Errorf("Load() = %+v, want env fallbacks applied", c)
-	}
-}
-
-func TestWatchReportsChangesAndBrokenEdits(t *testing.T) {
-	path := writeConfig(t, validYAML)
-	type result struct {
-		cfg Config
-		err error
-	}
-	got := make(chan result, 4)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go Watch(ctx, path, 5*time.Millisecond, func(c Config, err error) { got <- result{c, err} })
-	time.Sleep(30 * time.Millisecond)
-
-	os.WriteFile(path, []byte(strings.Replace(validYAML, "secret-pw", "new-pw", 1)), 0o644)
-	select {
-	case r := <-got:
-		if r.err != nil || r.cfg.Opencode.Password != "new-pw" {
-			t.Errorf("after edit: %+v", r)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("Watch did not report the changed file")
-	}
-
-	os.WriteFile(path, []byte("opencode: [not valid"), 0o644)
-	select {
-	case r := <-got:
-		if r.err == nil {
-			t.Error("a broken edit should be reported as an error")
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("Watch did not report the broken file")
-	}
-}
-
-func TestAttentionListenAddrMustBeLoopback(t *testing.T) {
-	for _, addr := range []string{":4097", "0.0.0.0:4097", "192.168.1.5:4097", "example.com:4097"} {
-		y := strings.Replace(validYAML, `"127.0.0.1:4097"`, `"`+addr+`"`, 1)
-		if _, err := Load(writeConfig(t, y)); err == nil {
-			t.Errorf("%s should be rejected: the gateway exposes opencode's credentials", addr)
-		}
-	}
-	for _, addr := range []string{"127.0.0.1:4097", "localhost:4097", "[::1]:4097"} {
-		y := strings.Replace(validYAML, `"127.0.0.1:4097"`, `"`+addr+`"`, 1)
-		if _, err := Load(writeConfig(t, y)); err != nil {
-			t.Errorf("%s should be accepted: %v", addr, err)
-		}
-	}
-}
-
-func TestModelPolicyAndSainikDefaultsLoad(t *testing.T) {
-	y := validYAML + `
-sainik:
-  directory: /repos
-  defaultModel: opencode-go/deepseek-v4.1-flash
-models:
-  - id: opencode-go/deepseek-v4.1-flash
-    credits: plentiful
-    use: routine work
-  - id: openai/gpt-6-sol
-    credits: scarce
-`
-	c, err := Load(writeConfig(t, y))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if c.Sainik.DefaultModel != "opencode-go/deepseek-v4.1-flash" || len(c.Models) != 2 || c.Models[1].Credits != "scarce" {
-		t.Errorf("Load() = %+v", c)
-	}
-}
-
-func TestMalformedModelReferencesAreRejected(t *testing.T) {
-	for _, y := range []string{
-		validYAML + "sainik:\n  defaultModel: gpt-6-sol\n",
-		validYAML + "models:\n  - id: gpt-6-sol\n",
-	} {
-		if _, err := Load(writeConfig(t, y)); err == nil {
-			t.Errorf("a model without a provider should be rejected:\n%s", y)
-		}
-	}
-}
-
-// The webhook filter depends on knowing who Senapati is on Linear: without
-// its user id its own comments come back as pings (the noise the user saw).
-func TestLinearIdentityIsRequired(t *testing.T) {
-	for _, key := range []string{"botUserID", "botHandle"} {
-		var kept []string
-		for _, line := range strings.Split(validYAML, "\n") {
-			if !strings.Contains(line, key+":") {
-				kept = append(kept, line)
-			}
-		}
-		if _, err := Load(writeConfig(t, strings.Join(kept, "\n"))); err == nil || !strings.Contains(err.Error(), "linear."+key) {
-			t.Errorf("without %s: err = %v", key, err)
-		}
-	}
-}
-
-func TestLinearThreadsFileDefaultsNextToTheConfig(t *testing.T) {
-	path := writeConfig(t, validYAML)
-	c, err := Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := filepath.Join(filepath.Dir(path), "mahamantri-linear-threads.json"); c.State.LinearThreadsFile != want {
-		t.Errorf("linearThreadsFile = %q, want %q", c.State.LinearThreadsFile, want)
-	}
-}
-
-func TestExtraPermissions(t *testing.T) {
-	ok := strings.Replace(validYAML, "  rotationThreshold: 0.4", "  rotationThreshold: 0.4\n  extraPermissions:\n    - {action: github_*, resource: \"*\", effect: allow}", 1)
-	c, err := Load(writeConfig(t, ok))
-	if err != nil || len(c.Senapati.ExtraPermissions) != 1 || c.Senapati.ExtraPermissions[0].Action != "github_*" {
-		t.Fatalf("Load = %+v, %v", c.Senapati.ExtraPermissions, err)
-	}
-	ask := strings.Replace(ok, "effect: allow", "effect: ask", 1)
-	if _, err := Load(writeConfig(t, ask)); err == nil || !strings.Contains(err.Error(), "extraPermissions[0]") {
-		t.Errorf("an ask rule would hang Senapati and must be rejected: %v", err)
-	}
-}
-
-const claudeYAML = `
-harness: claude
-linear:
-  signingSecret: lin_wh_test
-  listenAddr: ":45821"
-  botUserID: "11111111-2222-4333-8444-555555555555"
-  botHandle: "senapati-bot"
-attention:
-  listenAddr: "127.0.0.1:4097"
-  registryFile: "./registry.json"
-state:
-  senapatiFile: "./senapati.json"
-sainik:
-  defaultModel: claude-opus-5
-models:
-  - {id: gpt-6-sol, use: hard reasoning}
-senapati:
-  model: {id: claude-opus-5}
-  fallbackModel: gpt-6-sol
-  rotationThreshold: 0.4
-claude:
-  idleExit: 3m
-  senapatiDeniedTools: [mcp__linear__delete_comment]
-  contextWindows: {gpt-6-sol: 272000}
-`
-
-// The Claude Code harness needs no opencode server, and names models by id.
-func TestClaudeHarnessConfig(t *testing.T) {
+func TestClaudeIsTheDefaultModeAndNeedsNoOpencode(t *testing.T) {
 	path := writeConfig(t, claudeYAML)
 	c, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	dir := filepath.Dir(path)
-	if c.Harness != "claude" || c.Claude.Binary != "claude" || c.Claude.IdleExit != 3*time.Minute || c.Claude.UsageWarnAt != 0.9 ||
-		c.Claude.StateFile != filepath.Join(dir, "mahamantri-claude.json") || c.Senapati.FallbackModel != "gpt-6-sol" ||
-		c.Claude.SenapatiDeniedTools[0] != "mcp__linear__delete_comment" || c.Claude.ContextWindows["gpt-6-sol"] != 272000 {
-		t.Errorf("config = %+v", c.Claude)
+	if c.Mode != "claude" || c.Bridge.ListenAddr != "127.0.0.1:4098" || c.Bridge.Store != filepath.Join(dir, "mahamantri.db") {
+		t.Errorf("defaults: mode %q bridge %+v", c.Mode, c.Bridge)
+	}
+	if !strings.HasSuffix(c.Bridge.DiscoveryFile, filepath.Join("samrajya", "bridge.json")) || !filepath.IsAbs(c.Bridge.DiscoveryFile) {
+		t.Errorf("discovery file = %q", c.Bridge.DiscoveryFile)
+	}
+	if c.Bridge.MainDirectory != "" || len(c.Bridge.TrustedUserIDs) != 1 || c.Linear.BotName != "Senapati" {
+		t.Errorf("config = %+v", c)
 	}
 }
 
-func TestHarnessDefaultsToOpencodeAndRejectsUnknown(t *testing.T) {
-	c, err := Load(writeConfig(t, validYAML))
-	if err != nil || c.Harness != "opencode" {
-		t.Errorf("harness = %q, %v", c.Harness, err)
-	}
-	if _, err := Load(writeConfig(t, "harness: codex\n"+validYAML)); err == nil || !strings.Contains(err.Error(), `harness "codex"`) {
-		t.Errorf("err = %v", err)
-	}
-	// opencode still requires provider/id model names
-	bad := strings.Replace(validYAML, "senapati:\n", "sainik:\n  defaultModel: gpt-6-sol\nsenapati:\n", 1)
-	if _, err := Load(writeConfig(t, bad)); err == nil {
-		t.Error("opencode harness must reject a model without a provider")
-	}
-}
-
-func TestWorkspace(t *testing.T) {
-	path := writeConfig(t, validYAML)
-	ws := filepath.Join(filepath.Dir(path), "repos")
-	os.MkdirAll(filepath.Join(ws, "app"), 0o755)
-	c, err := Load(writeConfigAt(t, path, "workspace: ./repos\nsainik:\n  directory: ./repos/app\n"+validYAML))
-	if err != nil || c.Workspace != ws || c.Sainik.Directory != filepath.Join(ws, "app") {
-		t.Fatalf("workspace=%q dir=%q err=%v", c.Workspace, c.Sainik.Directory, err)
-	}
-	if _, err := Load(writeConfigAt(t, path, "workspace: ./repos\nsainik:\n  directory: /tmp\n"+validYAML)); err == nil || !strings.Contains(err.Error(), "inside workspace") {
-		t.Errorf("sainik.directory outside the workspace: %v", err)
-	}
-	if _, err := Load(writeConfigAt(t, path, "workspace: ./nope\n"+validYAML)); err == nil {
-		t.Error("a missing workspace must be an error")
-	}
-	for path, want := range map[string]bool{"/srv/ws": true, "/srv/ws/a/b": true, "/srv/wsx": false, "/srv": false, "/srv/ws/../x": false} {
-		if Within("/srv/ws", path) != want {
-			t.Errorf("Within(/srv/ws, %s) != %v", path, want)
-		}
-	}
-}
-
-func writeConfigAt(t *testing.T, path, contents string) string {
-	t.Helper()
-	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
-
-func TestProjectOf(t *testing.T) {
-	for dir, want := range map[string]string{"/srv/ws/app": "app", "/srv/ws/app/sub/x": "app", "/srv/ws": "", "/srv/other": "", "/srv/wsx/app": ""} {
-		if got := ProjectOf("/srv/ws", dir); got != want {
-			t.Errorf("ProjectOf(%s) = %q, want %q", dir, got, want)
-		}
-	}
-	if ProjectOf("", "/srv/ws/app") != "" {
-		t.Error("no workspace: no project")
-	}
-}
-
-const nativeYAML = `
-mode: native
-linear:
-  signingSecret: s
-  listenAddr: ":8080"
-  botUserID: bot
-  botHandle: senapati
-native:
-  trustedUserIDs: [u-owner]
-`
-
-// Native mode needs Linear and the bridge, not the managed harness: no
-// opencode server, registry, Senapati state or rotation settings.
-func TestNativeModeNeedsNoManagedSettings(t *testing.T) {
-	path := writeConfig(t, nativeYAML)
-	c, err := Load(path)
+func TestOpencodeModeNeedsItsServer(t *testing.T) {
+	c, err := Load(writeConfig(t, opencodeYAML))
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir := filepath.Dir(path)
-	if c.Mode != "native" || c.Native.ListenAddr != "127.0.0.1:4098" || c.Native.Store != filepath.Join(dir, "mahamantri-native.db") {
-		t.Errorf("defaults: %+v", c.Native)
+	if !strings.HasSuffix(c.Opencode.InstructionsFile, filepath.Join("senapati", "senapati.md")) {
+		t.Errorf("instructions = %q", c.Opencode.InstructionsFile)
 	}
-	if !strings.HasSuffix(c.Native.DiscoveryFile, filepath.Join("samrajya", "bridge.json")) || !filepath.IsAbs(c.Native.DiscoveryFile) {
-		t.Errorf("discovery file = %q", c.Native.DiscoveryFile)
-	}
-	if c.Native.MainDirectory != "" {
-		t.Errorf("main directory without a workspace = %q", c.Native.MainDirectory)
-	}
-	if len(c.Native.TrustedUserIDs) != 1 {
-		t.Errorf("trusted = %v", c.Native.TrustedUserIDs)
-	}
-}
-
-func TestNativeModeValidation(t *testing.T) {
+	t.Setenv("OPENCODE_SERVER_PASSWORD", "")
 	for name, yaml := range map[string]string{
-		"no linear secret": strings.Replace(nativeYAML, "signingSecret: s", "signingSecret: \"\"", 1),
-		"public bridge":    nativeYAML + "  listenAddr: \":4098\"\n",
-		"unknown mode":     strings.Replace(nativeYAML, "mode: native", "mode: hybrid", 1),
+		"no server":   strings.Replace(opencodeYAML, "serverURL: http://127.0.0.1:4096", "serverURL: \"\"", 1),
+		"bad server":  strings.Replace(opencodeYAML, "http://127.0.0.1:4096", "localhost:4096", 1),
+		"no password": strings.Replace(opencodeYAML, "password: pw", "password: \"\"", 1),
+		"no provider": strings.Replace(opencodeYAML, "providerID: acme, ", "", 1),
 	} {
-		t.Setenv("LINEAR_SIGNING_SECRET", "")
 		if _, err := Load(writeConfig(t, yaml)); err == nil {
 			t.Errorf("%s: loaded", name)
 		}
 	}
 }
 
-func TestModeDefaultsToManaged(t *testing.T) {
-	c, err := Load(writeConfig(t, validYAML))
-	if err != nil || c.Mode != "managed" {
-		t.Errorf("mode = %q, %v", c.Mode, err)
+func TestEnvFallbacksFillEmptySecrets(t *testing.T) {
+	t.Setenv("LINEAR_SIGNING_SECRET", "from-env")
+	t.Setenv("OPENCODE_SERVER_PASSWORD", "pw-env")
+	yaml := strings.Replace(strings.Replace(opencodeYAML, "signingSecret: s", "signingSecret: \"\"", 1), "password: pw", "password: \"\"", 1)
+	c, err := Load(writeConfig(t, yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Linear.SigningSecret != "from-env" || c.Opencode.Password != "pw-env" {
+		t.Errorf("secrets = %q %q", c.Linear.SigningSecret, c.Opencode.Password)
 	}
 }
 
-func TestNativeMainDirectoryDefaultsToTheWorkspace(t *testing.T) {
-	path := writeConfig(t, nativeYAML+"workspace: ws\n")
-	os.Mkdir(filepath.Join(filepath.Dir(path), "ws"), 0o755)
+func TestValidation(t *testing.T) {
+	t.Setenv("LINEAR_SIGNING_SECRET", "")
+	for name, yaml := range map[string]string{
+		"unknown key":       claudeYAML + "harness: claude\n",
+		"unknown mode":      "mode: managed\n" + claudeYAML,
+		"no secret":         strings.Replace(claudeYAML, "signingSecret: s", "signingSecret: \"\"", 1),
+		"no listen":         strings.Replace(claudeYAML, "listenAddr: \":8080\"", "listenAddr: \"\"", 1),
+		"no bot id":         strings.Replace(claudeYAML, "botUserID: bot", "botUserID: \"\"", 1),
+		"no handle":         strings.Replace(claudeYAML, "botHandle: senapati", "botHandle: \"\"", 1),
+		"public bridge":     claudeYAML + "  listenAddr: \":4098\"\n",
+		"missing main dir":  claudeYAML + "  mainDirectory: /nonexistent/dir\n",
+		"missing workspace": "workspace: /nonexistent/ws\n" + claudeYAML,
+	} {
+		if _, err := Load(writeConfig(t, yaml)); err == nil {
+			t.Errorf("%s: loaded", name)
+		}
+	}
+}
+
+func TestPathsResolveAgainstTheConfigAndMainDirectoryDefaultsToTheWorkspace(t *testing.T) {
+	path := writeConfig(t, "workspace: ws\nbrain: mem\n"+claudeYAML)
+	dir := filepath.Dir(path)
+	os.Mkdir(filepath.Join(dir, "ws"), 0o755)
+	t.Chdir(t.TempDir())
 	c, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Native.MainDirectory != filepath.Join(filepath.Dir(path), "ws") {
-		t.Errorf("main directory = %q", c.Native.MainDirectory)
-	}
-	if _, err := Load(writeConfig(t, nativeYAML+"  mainDirectory: /nonexistent/dir\n")); err == nil {
-		t.Error("a missing main directory was accepted")
+	if c.Workspace != filepath.Join(dir, "ws") || c.Bridge.MainDirectory != c.Workspace || c.Brain != filepath.Join(dir, "mem") {
+		t.Errorf("paths: workspace %q main %q brain %q", c.Workspace, c.Bridge.MainDirectory, c.Brain)
 	}
 }

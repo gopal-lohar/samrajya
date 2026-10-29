@@ -1,6 +1,6 @@
 import { readFile, realpath } from 'node:fs/promises';
 
-// Client for mahamantri's native bridge API (mahamantri/bridge). Mahamantri
+// Client for mahamantri's bridge API (mahamantri/bridge). Mahamantri
 // writes its address and a fresh token to the discovery file on every
 // start, so the file is reread whenever the bridge stops answering or
 // rejects the token.
@@ -30,7 +30,7 @@ export class Bridge {
       try {
         raw = await readFile(this.discoveryPath, 'utf8');
       } catch {
-        throw new BridgeError(0, `mahamantri is not running in native mode (no ${this.discoveryPath})`);
+        throw new BridgeError(0, `mahamantri is not running (no ${this.discoveryPath})`);
       }
       const d = JSON.parse(raw) as Partial<Discovery>;
       if (typeof d.url !== 'string' || typeof d.token !== 'string') {
@@ -64,7 +64,7 @@ export class Bridge {
     } catch (error) {
       if (signal?.aborted) throw error;
       this.reset();
-      throw new BridgeError(0, 'cannot reach mahamantri\'s bridge - is it running in native mode?');
+      throw new BridgeError(0, 'cannot reach mahamantri\'s bridge - is it running?');
     }
     const text = await res.text();
     let json: any;

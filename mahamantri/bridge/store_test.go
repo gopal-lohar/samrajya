@@ -213,18 +213,16 @@ func TestUnknownSchemaIsRefusedNotReplaced(t *testing.T) {
 	}
 }
 
-func TestImportThreadsOnce(t *testing.T) {
-	s, _ := openStore(t)
-	legacy := filepath.Join(t.TempDir(), "threads.json")
-	if n, err := s.ImportThreads(legacy); n != 0 || err != nil {
-		t.Errorf("missing file: %d %v", n, err)
+func TestMetaPersists(t *testing.T) {
+	s, path := openStore(t)
+	if s.Meta("opencode.session") != "" {
+		t.Fatal("unset meta must be empty")
 	}
-	os.WriteFile(legacy, []byte(`{"t1":{"issue":"ENG-1","seen":"2026-01-01T00:00:00Z"},"t2":{"issue":"ENG-2"}}`), 0o600)
-	if n, err := s.ImportThreads(legacy); n != 2 || err != nil || !s.Has("t1") || !s.Has("t2") {
-		t.Fatalf("import: %d %v", n, err)
-	}
-	os.WriteFile(legacy, []byte(`{"t3":{"issue":"ENG-3"}}`), 0o600)
-	if n, _ := s.ImportThreads(legacy); n != 0 || s.Has("t3") {
-		t.Error("a second import must not run")
+	s.SetMeta("opencode.session", "ses_1")
+	s.Close()
+	again, _ := Open(path, nil)
+	defer again.Close()
+	if got := again.Meta("opencode.session"); got != "ses_1" {
+		t.Errorf("meta = %q", got)
 	}
 }

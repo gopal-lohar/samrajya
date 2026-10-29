@@ -2,24 +2,18 @@
 
 Opinionated Agentic AI framework to manage agentic workflows with Claude Code or opencode, and Linear.
 
-- `mahamantri/` - the Go program that relays Linear pings (mentions of
-  Senapati, replies in its threads) and sainik session status to Senapati,
-  the manager agent, and gives it a restricted toolset: start, message and
-  inspect sainiks, one agent session per issue that does the actual work.
-  Sessions run on Claude Code (`harness: claude`) or an opencode server
-  (`harness: opencode`). See its README.
-- `senapati/` - Senapati's role instructions (`senapati.md`), sent to it as its
-  briefing by mahamantri.
+Samrajya's main assistant is one hands-on agent session. It does the work
+itself and delegates to background agents only when that is faster. You talk
+to it directly or through Linear.
 
-## Native mode
-
-Instead of a manager agent routing work to sainiks, the main assistant can be an
-ordinary interactive Claude Code session. It runs on your Claude subscription,
-you can reach it from the terminal or your phone through Remote Control, and it
-does the work itself. In this mode (`mode: native`), mahamantri keeps a durable
-inbox of Linear pings, the tasks they become, a journal of external actions,
-and the brain. The Samrajya channel plugin
-(`integrations/claude-channel/`) feeds pings into the session and gives it tools
-for that state. See the plugin's README to set it up, and mahamantri's README
-for the configuration. Managed mode stays the default and keeps full Claude
-Code and opencode support.
+- `mahamantri/`: the Go bridge. It holds a durable inbox of Linear pings (a
+  mention of Senapati, the bot account, or a reply in its thread), the tasks
+  they become, a journal of external actions, and the brain, Samrajya's memory
+  of the work. It serves them to the main session over a local API. The session
+  runs on Claude Code (`mode: claude`, on your Claude subscription and reachable
+  through Remote Control) or on an opencode server (`mode: opencode`). See its
+  README.
+- `integrations/claude-channel/`: the Samrajya plugin. It pushes pings into a
+  Claude Code session as channel events and gives either kind of session its
+  bridge tools.
+- `senapati/senapati.md`: the main session's role.

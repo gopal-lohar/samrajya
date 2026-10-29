@@ -1,8 +1,14 @@
+// Mahamantri is the bridge between Linear and Samrajya's main assistant
+// session: it keeps the durable inbox of Linear pings, the tasks they
+// become, the journal of external actions and the brain, and serves them to
+// the session over a local, authenticated API. See README.md.
 package main
 
 import (
 	"context"
-	"errors"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -11,21 +17,14 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"reflect"
 	"strings"
-	"sync/atomic"
 	"syscall"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/gopal-lohar/samrajya/mahamantri/attention"
 	"github.com/gopal-lohar/samrajya/mahamantri/brain"
+	"github.com/gopal-lohar/samrajya/mahamantri/bridge"
 	"github.com/gopal-lohar/samrajya/mahamantri/config"
-	"github.com/gopal-lohar/samrajya/mahamantri/harness"
 	"github.com/gopal-lohar/samrajya/mahamantri/linear"
-	"github.com/gopal-lohar/samrajya/mahamantri/opencode"
-	"github.com/gopal-lohar/samrajya/mahamantri/senapati"
-	"github.com/gopal-lohar/samrajya/mahamantri/ui"
 )
 
 func main() {
@@ -43,277 +42,130 @@ func main() {
 	}
 }
 
-// backend is everything that differs between harnesses: what sessions run
-// on, and so how they are created, read, driven and shown. Built by
-// setupOpencode or setupClaude.
-type backend struct {
-	parents   interface{ SessionParent(string) (string, bool) }
-	sender    senapati.PromptSender
-	createReq opencode.CreateSessionRequest // Senapati's session
-	replies   func(ctx context.Context, id string) (string, error)
-	active    func(ctx context.Context) (map[string]bool, error)
-	lookup    attention.SessionLookup
-	routes    func(mux *http.ServeMux, reg *attention.Registry)
-	attach    func(id string) string
-	problems  func() []string
-	onConfig  func(config.Config) // a reloaded config; returns nothing applied live by default
-	start     func(ctx context.Context)
-	shutdown  func()
-}
-
+// run serves the bridge: the Linear webhook into the durable inbox, and the
+// local API the main session's tools use. It never stops the main session
+// itself; Ctrl+C stops mahamantri only.
 func run(configPath string) error {
-	configPath, err := filepath.Abs(configPath)
-	if err != nil {
-		return err
-	}
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return err
 	}
-
-	logFile, err := os.OpenFile(cfg.LogFile(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	logFile, err := os.OpenFile(cfg.LogFile(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
 	defer logFile.Close()
 	logger := log.New(logFile, "", log.LstdFlags)
 
-	// Native mode shares only the config and the log with managed mode: it
-	// must not create, rotate or shut down a Senapati session.
-	if cfg.Mode == "native" {
-		return runNative(cfg, logger)
+	store, err := bridge.Open(cfg.Bridge.Store, cfg.Bridge.TrustedUserIDs)
+	if err != nil {
+		return fmt.Errorf("bridge.store %s: %w", cfg.Bridge.Store, err)
+	}
+	defer store.Close()
+
+	token, err := newToken()
+	if err != nil {
+		return err
+	}
+	srv := &bridge.Server{Store: store, Token: token, Logger: logger}
+	if cfg.Brain != "" {
+		if srv.Brain, err = brain.Open(cfg.Brain, func() []string { return projects(cfg.Workspace) }); err != nil {
+			return fmt.Errorf("brain %s: %w", cfg.Brain, err)
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-
-	base := httpURL(cfg.Attention.ListenAddr)
-	cmds := harness.For(cfg.Harness, base)
-	raw := make(chan opencode.Event, 64)
-
-	// Samrajya's memory of the work: summarised in Senapati's briefing, and
-	// a project's notes given to every sainik started in that project.
-	var mem *brain.Store
-	if cfg.Brain != "" {
-		if mem, err = brain.Open(cfg.Brain, func() []string { return projects(cfg.Workspace) }); err != nil {
-			return fmt.Errorf("brain %s: %w", cfg.Brain, err)
+	var oc *opencodeMain
+	if cfg.Mode == "opencode" {
+		if oc, err = newOpencodeMain(ctx, cfg, store, logger); err != nil {
+			return err
 		}
 	}
-	sainikRole := func(dir string) string {
-		role := senapati.SainikRole(cfg.Workspace)
-		if mem != nil {
-			project := config.ProjectOf(cfg.Workspace, dir)
-			role += senapati.ProjectNotes(project, mem.ForProject(project))
-		}
-		return role
-	}
 
-	// Everything that can fail on startup fails here, before a Senapati
-	// session is created and before the TUI takes over the screen, with a
-	// message that says what to fix.
-	var be backend
-	if cfg.Harness == "claude" {
-		be, err = setupClaude(ctx, cfg, base, raw, logger, sainikRole)
-	} else {
-		be, err = setupOpencode(ctx, cfg, configPath, raw, sainikRole)
-	}
+	bridgeLn, err := net.Listen("tcp", cfg.Bridge.ListenAddr)
 	if err != nil {
-		return err
-	}
-	defer be.shutdown()
-
-	attnLn, err := net.Listen("tcp", cfg.Attention.ListenAddr)
-	if err != nil {
-		return fmt.Errorf("cannot listen on attention.listenAddr %s: %w (is another mahamantri running?)", cfg.Attention.ListenAddr, err)
+		return fmt.Errorf("cannot listen on bridge.listenAddr %s: %w (is another mahamantri running?)", cfg.Bridge.ListenAddr, err)
 	}
 	linearLn, err := net.Listen("tcp", cfg.Linear.ListenAddr)
 	if err != nil {
+		bridgeLn.Close()
 		return fmt.Errorf("cannot listen on linear.listenAddr %s: %w (is another mahamantri running?)", cfg.Linear.ListenAddr, err)
 	}
-
-	bcast := attention.NewBroadcaster()
-	go bcast.Run(ctx, raw)
-
-	reg := attention.NewRegistry(cfg.Attention.RegistryFile, be.parents)
-	if err := reg.ReloadFromDisk(); err != nil {
-		return fmt.Errorf("reading %s: %w (fix or delete it)", cfg.Attention.RegistryFile, err)
+	base := httpURL(bridgeLn.Addr().String())
+	if err := writeDiscovery(cfg.Bridge.DiscoveryFile, base, token, cfg.Bridge.MainDirectory); err != nil {
+		return fmt.Errorf("bridge.discoveryFile %s: %w", cfg.Bridge.DiscoveryFile, err)
 	}
-	if running, err := be.active(ctx); err == nil {
-		reg.SeedRunning(running)
-	} else {
-		logger.Printf("could not read which sessions are running: %v", err)
-	}
-	go reg.PollFile(ctx, 3*time.Second)
+	defer os.Remove(cfg.Bridge.DiscoveryFile)
 
-	threads, err := linear.LoadThreads(cfg.State.LinearThreadsFile)
-	if err != nil {
-		return fmt.Errorf("reading %s: %w (fix or delete it)", cfg.State.LinearThreadsFile, err)
-	}
-
-	// Fail now, not at the next rotation, if the instructions file is unreadable.
-	if _, err := senapati.LoadInstructions(cfg.Senapati.InstructionsFile); err != nil {
-		return err
-	}
-	mgr := senapati.New(be.sender, cfg.State.SenapatiFile, cfg.Senapati.RotationThreshold, reg)
-	mgr.SetBriefing(func() (string, error) {
-		instructions, err := senapati.LoadInstructions(cfg.Senapati.InstructionsFile)
-		if err != nil {
-			return "", err
-		}
-		var models []senapati.ModelChoice
-		for _, m := range cfg.Models {
-			models = append(models, senapati.ModelChoice{ID: m.ID, Credits: m.Credits, Use: m.Use})
-		}
-		return senapati.Briefing(senapati.BriefingInfo{
-			LinearUserID:  cfg.Linear.BotUserID,
-			LinearName:    cfg.Linear.BotName,
-			LinearHandle:  cfg.Linear.BotHandle,
-			MahamantriURL: base,
-			Harness:       cfg.Harness,
-			Workspace:     cfg.Workspace,
-			Projects:      projects(cfg.Workspace),
-			Memory:        mem != nil,
-			MemoryIndex:   memIndex(mem),
-			DefaultModel:  cfg.Sainik.DefaultModel,
-			Models:        models,
-			Instructions:  instructions,
-		}), nil
-	})
-	be.start(ctx)
-	startCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	senapatiID, err := mgr.Start(startCtx, be.createReq)
-	cancel()
-	if err != nil {
-		return err
-	}
-	reg.Protect(senapatiID) // must happen before the attention API starts serving
-	logger.Printf("senapati session: %s (%s) on %s", senapatiID, mgr.Current().Title, cfg.Harness)
-	go mgr.Run(ctx)
-
-	// One subscriber, in order: Observe first so the registry's status is
-	// settled for this event, then the takeover/attention checks that may
-	// override or act on it. The broadcaster drops what a full buffer can't
-	// take, and a dropped completion is a sainik Senapati never hears about
-	// - so this one is sized for bursts.
-	events := bcast.Subscribe(4096)
-	go func() {
-		for ev := range events {
-			reg.Observe(ev)
-			instID, ok := reg.Owner(ev.SessionID)
-			if !ok {
-				continue
-			}
-			inst, ok := reg.Get(instID)
-			if !ok {
-				continue
-			}
-			// Judged on the registered session itself only: its subagents
-			// receive task prompts from opencode that carry no tag.
-			// Senapati's own interrupt (through mahamantri) is not a person
-			// stepping in, and needs no notice: its message follows it.
-			if ev.Type == "session.execution.interrupted" && ev.SessionID == instID && reg.TakeExpectedInterrupt(instID) {
-				continue
-			}
-			if action, manual := attention.DetectManualTakeover(ev); manual && ev.SessionID == instID {
-				reg.MarkManual(instID, "a person intervened")
-				forward(logger, mgr, senapati.SummarizeManualTakeover(inst, action))
-				continue
-			}
-			if ev.Type == "session.manual.started" { // claude harness: opened with claude --resume
-				reg.MarkManual(instID, "a person opened it")
-				forward(logger, mgr, senapati.SummarizeManualTakeover(inst, "opened it with claude --resume ("+ev.Summary+")"))
-				continue
-			}
-			if !reg.NeedsAttention(ev) {
-				continue
-			}
-			if ev.SessionID == instID && (ev.Type == "session.execution.succeeded" || ev.Type == "session.execution.failed" ||
-				ev.Type == "session.idle" || ev.Type == "session.manual.ended") {
-				// The notice carries the sainik's report; reading it may be
-				// an HTTP call, kept off this loop.
-				go func(ev opencode.Event, inst attention.Instance) {
-					rctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-					defer cancel()
-					reply, err := be.replies(rctx, inst.SessionID)
-					if err != nil {
-						logger.Printf("reading %s's final reply: %v", inst.SessionID, err)
-					}
-					forward(logger, mgr, senapati.SummarizeEvent(ev, inst, reply, cmds))
-				}(ev, inst)
-				continue
-			}
-			forward(logger, mgr, senapati.SummarizeEvent(ev, inst, "", cmds))
-		}
-	}()
-
-	// One local API: the attention API and the harness's session API.
-	mux := http.NewServeMux()
-	attention.Routes(mux, reg, bcast, be.lookup)
-	be.routes(mux, reg)
-	if mem != nil {
-		brain.Routes(mux, mem)
-	}
-	attnSrv := &http.Server{Handler: mux}
-	linearSrv := &http.Server{Handler: &linear.Handler{
-		Secret:   cfg.Linear.SigningSecret,
-		Self:     linear.Identity{UserID: cfg.Linear.BotUserID, Name: cfg.Linear.BotName, Handle: cfg.Linear.BotHandle},
-		Threads:  threads,
-		Sainiks:  senapati.IssueSainiks(reg),
-		Commands: cmds,
-		Forward:  mgr,
-		Logger:   logger,
+	bridgeSrv := &http.Server{Handler: srv, ReadHeaderTimeout: 5 * time.Second}
+	linearSrv := &http.Server{ReadHeaderTimeout: 5 * time.Second, Handler: &linear.Handler{
+		Secret:  cfg.Linear.SigningSecret,
+		Self:    linear.Identity{UserID: cfg.Linear.BotUserID, Name: cfg.Linear.BotName, Handle: cfg.Linear.BotHandle},
+		Threads: store,
+		Sink:    srv,
+		Logger:  logger,
 	}}
-	go attnSrv.Serve(attnLn)
-	go linearSrv.Serve(linearLn)
-
-	// Editing the config while running: the opencode password takes effect
-	// at once (opencode serve picks a new one every start); anything else
-	// needs a restart, and the TUI says so instead of silently ignoring it.
-	var configNotice atomic.Value
-	go config.Watch(ctx, configPath, 2*time.Second, func(c config.Config, err error) {
-		if err != nil {
-			configNotice.Store(filepath.Base(configPath) + " not applied: " + err.Error())
-			return
-		}
-		be.onConfig(c)
-		running, reloaded := cfg, c
-		running.Opencode.Password, reloaded.Opencode.Password = "", ""
-		if !reflect.DeepEqual(running, reloaded) {
-			configNotice.Store(filepath.Base(configPath) + " changed - restart mahamantri to apply it")
-			return
-		}
-		configNotice.Store("")
-	})
-
-	problems := func() []string {
-		out := be.problems()
-		if err := mgr.LastError(); err != nil {
-			out = append(out, err.Error())
-		}
-		if cfg.Senapati.Model.ID == "" {
-			out = append(out, "senapati.model is not set - Senapati runs on the harness's default model, not the one you pick in its TUI")
-		}
-		if notice, _ := configNotice.Load().(string); notice != "" {
-			out = append(out, notice)
-		}
-		return out
+	errs := make(chan error, 2)
+	go func() { errs <- bridgeSrv.Serve(bridgeLn) }()
+	go func() { errs <- linearSrv.Serve(linearLn) }()
+	if oc != nil {
+		go oc.deliver(ctx, srv)
 	}
 
-	_, tuiErr := tea.NewProgram(ui.New(reg, mgr, be.attach, problems)).Run()
+	rec, err := store.Recovery()
+	if err != nil {
+		return err
+	}
+	logger.Printf("mahamantri (%s): bridge on %s, Linear webhook on %s, store %s", cfg.Mode, base, linearLn.Addr(), cfg.Bridge.Store)
+	fmt.Fprintf(os.Stderr, "mahamantri (%s): bridge %s, Linear webhook %s\n"+
+		"  store %s - %d pending pings, %d open tasks, %d unresolved actions\n",
+		cfg.Mode, base, linearLn.Addr(), cfg.Bridge.Store, len(rec.Pending), len(rec.Open), len(rec.Uncertain))
+	if oc != nil {
+		fmt.Fprintf(os.Stderr, "  main session: opencode session %s\n", oc.session)
+	}
 
-	stop()
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	select {
+	case <-ctx.Done():
+	case err = <-errs:
+		logger.Printf("server stopped: %v", err)
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	attnSrv.Shutdown(shutdownCtx)
 	linearSrv.Shutdown(shutdownCtx)
-	return tuiErr
+	bridgeSrv.Shutdown(shutdownCtx)
+	if err != nil && err != http.ErrServerClosed {
+		return err
+	}
+	return nil
 }
 
-func memIndex(mem *brain.Store) string {
-	if mem == nil {
-		return ""
+func newToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
 	}
-	return mem.Index()
+	return hex.EncodeToString(b), nil
+}
+
+// writeDiscovery tells the plugin where the bridge is, the token for this
+// run and where the main session runs, readable only by this user.
+func writeDiscovery(path, url, token, mainDir string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	if real, err := filepath.EvalSymlinks(mainDir); err == nil {
+		mainDir = real
+	}
+	data, err := json.Marshal(map[string]any{"url": url, "token": token, "pid": os.Getpid(), "mainDirectory": mainDir})
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // projects lists the project directories in the workspace.
@@ -344,32 +196,4 @@ func httpURL(listenAddr string) string {
 		host = "127.0.0.1"
 	}
 	return "http://" + net.JoinHostPort(host, port)
-}
-
-func forward(logger *log.Logger, mgr *senapati.Manager, text string) {
-	if err := mgr.Forward(text); err != nil {
-		logger.Printf("could not queue message for senapati: %v", err)
-	}
-}
-
-// connectionProblem turns a connect/auth failure into a line that says what
-// is wrong and what to do about it. At startup (running=false) it can be
-// long and explain the fix; inside the TUI it must fit on one terminal row.
-func connectionProblem(cfg config.Config, configPath string, err error, running bool) string {
-	name := filepath.Base(configPath)
-	switch {
-	case err == nil:
-		return "connecting to the opencode server..."
-	case errors.Is(err, opencode.ErrUnauthorized) && running:
-		return "opencode rejected the password - update opencode.password in " + name + " (applied live)"
-	case errors.Is(err, opencode.ErrUnauthorized):
-		return fmt.Sprintf("opencode server %s rejected the password in %s (opencode.password). "+
-			"`opencode serve` picks a new password on every start - put the current one there and start mahamantri again, "+
-			"or start the server as OPENCODE_SERVER_PASSWORD=<fixed> opencode serve so it never changes",
-			cfg.Opencode.ServerURL, name)
-	case running:
-		return fmt.Sprintf("cannot reach opencode at %s (%v) - retrying", cfg.Opencode.ServerURL, err)
-	default:
-		return fmt.Sprintf("cannot reach the opencode server at %s: %v (is it running?)", cfg.Opencode.ServerURL, err)
-	}
 }

@@ -1,8 +1,6 @@
 package linear
 
 import (
-	"github.com/gopal-lohar/samrajya/mahamantri/harness"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -112,86 +110,5 @@ func TestOwnCommentRecordsItsThread(t *testing.T) {
 	}
 	if _, _, ok := ownComment([]byte(mentionBody), senapati); ok {
 		t.Error("a person's comment is not Senapati's")
-	}
-}
-
-func TestThreadsPersist(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "threads.json")
-	a, err := LoadThreads(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := a.Add("t-1", "ENG-31"); err != nil {
-		t.Fatal(err)
-	}
-	b, err := LoadThreads(path)
-	if err != nil || !b.Has("t-1") || b.Has("t-2") {
-		t.Errorf("reloaded: has t-1=%v t-2=%v err=%v", b.Has("t-1"), b.Has("t-2"), err)
-	}
-}
-
-func TestFormatSaysItIsAPingAndHowToRouteIt(t *testing.T) {
-	p, _, _ := Classify("Comment", []byte(mentionBody), senapati, nil)
-	got := Format(p, nil, oc)
-	for _, want := range []string{
-		"[Linear ping] ENG-31",
-		"Asha mentioned you in a comment",
-		"> @senapati-bot please pick this up",
-		"Sainik for ENG-31: none yet.",
-		"not a person chatting with you",
-		"re-read ENG-31",
-		"do not wait",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("Format() missing %q:\n%s", want, got)
-		}
-	}
-}
-
-// Regression: left to work out the API, Senapati probed endpoints that don't
-// exist and gave up. Every ping spells out the exact command for its case.
-var oc = harness.For("opencode", "http://127.0.0.1:4097")
-
-func TestFormatGivesTheExactCommandForEachCase(t *testing.T) {
-	p, _, _ := Classify("Comment", []byte(mentionBody), senapati, nil)
-
-	none := Format(p, nil, oc)
-	for _, want := range []string{
-		`curl -s -X POST http://127.0.0.1:4097/opencode/api/session -H 'Content-Type: application/json' -d '{"title":"sainik-ENG-31-<short-name>"}'`,
-		`curl -s -X POST http://127.0.0.1:4097/opencode/api/session/<id>/prompt`,
-	} {
-		if !strings.Contains(none, want) {
-			t.Errorf("no sainik: missing %q:\n%s", want, none)
-		}
-	}
-
-	busy := Format(p, []Sainik{{Label: "sainik-ENG-31-fix", SessionID: "ses_k", Status: "running", Phase: "executing"}}, oc)
-	for _, want := range []string{
-		`"sainik-ENG-31-fix" (session ses_k): running (busy with a turn), phase "executing"`,
-		`curl -s -X POST http://127.0.0.1:4097/opencode/api/session/ses_k/prompt`,
-		`curl -s -X POST http://127.0.0.1:4097/opencode/api/session/ses_k/interrupt`,
-		`curl -s http://127.0.0.1:4097/opencode/api/session/active | jq '.data["ses_k"]'`,
-	} {
-		if !strings.Contains(busy, want) {
-			t.Errorf("with a sainik: missing %q:\n%s", want, busy)
-		}
-	}
-	if strings.Contains(busy, "/opencode/api/session -H") {
-		t.Errorf("with a sainik, the ping must not offer to start another:\n%s", busy)
-	}
-}
-
-func TestFormatUsesClaudeCommandsOnTheClaudeHarness(t *testing.T) {
-	p, _, _ := Classify("Comment", []byte(mentionBody), senapati, nil)
-	cc := harness.For("claude", "http://127.0.0.1:4097")
-	none := Format(p, nil, cc)
-	if !strings.Contains(none, `curl -s -X POST http://127.0.0.1:4097/claude/session -H 'Content-Type: application/json' -d '{"title":"sainik-ENG-31-<short-name>","text":`) {
-		t.Errorf("no sainik:\n%s", none)
-	}
-	busy := Format(p, []Sainik{{Label: "sainik-ENG-31-fix", SessionID: "u-1", Status: "running"}}, cc)
-	for _, want := range []string{"/claude/session/u-1/prompt", "/claude/session/u-1/interrupt", "curl -s http://127.0.0.1:4097/claude/session/u-1 | jq .state"} {
-		if !strings.Contains(busy, want) {
-			t.Errorf("missing %q:\n%s", want, busy)
-		}
 	}
 }

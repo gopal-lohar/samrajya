@@ -7,7 +7,7 @@
     {
       "name": "samrajya",
       "source": "./claude-channel/plugin",
-      "description": "Samrajya channel for a native Claude Code main session"
+      "description": "Samrajya channel and bridge tools for the main session"
     }
   ]
 }

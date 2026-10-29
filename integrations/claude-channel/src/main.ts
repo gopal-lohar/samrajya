@@ -3,11 +3,11 @@ import { join } from 'node:path';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { createChannel } from './channel.js';
 
-// Same default as mahamantri's native.discoveryFile.
+// Same default as mahamantri's bridge.discoveryFile.
 const discoveryPath = process.env.SAMRAJYA_BRIDGE_FILE ||
   join(process.env.XDG_STATE_HOME || join(homedir(), '.local', 'state'), 'samrajya', 'bridge.json');
 
-const channel = createChannel({ discoveryPath });
+const channel = createChannel({ discoveryPath, main: process.env.SAMRAJYA_MAIN === '1' });
 channel.mcp.oninitialized = () => channel.start();
 let stopping = false;
 async function stop() {

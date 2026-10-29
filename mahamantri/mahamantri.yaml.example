@@ -1,102 +1,36 @@
 # Relative paths below resolve against the directory containing this file,
 # not the directory you launch mahamantri from.
 
-# How Senapati runs: "managed" (the default: mahamantri runs it and its
-# sainiks on the harness below, with the TUI) or "native" (your own interactive
-# Claude Code session with the Samrajya channel plugin does the work, and
-# mahamantri keeps the durable inbox, tasks and brain for it - see the README's
-# "Native mode"; only linear, workspace, brain and native apply then).
-mode: managed
-native:
-  listenAddr: "127.0.0.1:4098"    # the bridge API for the plugin; loopback only
-  store: mahamantri-native.db
-  # discoveryFile: ""            # default $XDG_STATE_HOME/samrajya/bridge.json
-  trustedUserIDs: []             # Linear users who may ask for work; empty = everyone
+# What the main session runs on: "claude" (an interactive Claude Code session
+# you start, with the Samrajya channel plugin) or "opencode" (a session on an
+# opencode server, configured below). See the README.
+mode: claude
 
-# What sessions run on: "claude" (Claude Code, run by mahamantri; uses your
-# Claude subscription and whatever your Claude Code setup routes to) or
-# "opencode" (an already-running `opencode serve`, configured below).
-harness: opencode
-# The directory holding the projects this system works on, one directory per
-# project (e.g. ../repos, which git ignores). Sainiks start in a project there,
-# are refused a directory outside it, and are told to stay inside it and to
-# follow each project's own AGENTS.md / CLAUDE.md. Empty: no limit.
-workspace: ""
-# Samrajya's memory of the work (e.g. ../brain, which git ignores): short notes
-# Senapati keeps on standing instructions, facts outside code and Linear, and
-# recurring problems. Shown in Senapati's briefing; a project's notes go to every
-# sainik started in that project. Plain markdown - read or edit it by hand.
-# Empty: no memory.
-brain: ""
-opencode:
-  serverURL: http://localhost:4096
-  # `opencode serve` picks a NEW password every start. Either paste the current
-  # one here (edits are picked up while mahamantri runs), or pin it once with
-  #   OPENCODE_SERVER_PASSWORD=<fixed> opencode serve --port 4096
-  # and never touch this again. Empty falls back to $OPENCODE_SERVER_PASSWORD.
-  password: ""
+# The projects this system works on, one directory per project.
+workspace: "../repos"
+# Samrajya's memory of the work. Empty: no memory.
+brain: "../brain"
+
 linear:
-  signingSecret: ""          # empty falls back to $LINEAR_SIGNING_SECRET
-  listenAddr: "127.0.0.1:45821"
-  # Senapati's own Linear account - required. Senapati is pinged for exactly
-  # two things: a person's comment that @-mentions botHandle, and a person's
-  # reply in a comment thread Senapati has written in (recognised by
-  # botUserID). Every other delivery - issue edits, status, labels,
-  # assignment, its own comments - is logged and dropped. botHandle is often
-  # the local part of the account's email, not its display name; botUserID is
-  # actor.id on any comment Senapati made, in mahamantri.log.
-  botUserID: ""
-  botName: ""                # defaults to "Senapati"
-  botHandle: ""
-attention:
-  listenAddr: "127.0.0.1:4097"
-  registryFile: "./mahamantri-registry.json"
-state:
-  senapatiFile: "./mahamantri-senapati.json"   # holds the current + retired Senapati session IDs
-  linearThreadsFile: "./mahamantri-linear-threads.json"   # comment threads Senapati has written in
-sainik:
-  directory: ""              # default working directory for sainiks; inside the workspace (empty: the workspace itself)
-  defaultModel: ""           # opencode: provider/id, e.g. openai/gpt-6-sol; claude: the model id, e.g. claude-opus-5
-  agent: ""                  # opencode agent for sainiks, optional
-# Models Senapati may choose for a sainik, with guidance it reads in its briefing.
-models: []
-#  - id: openai/gpt-6-sol
-#    credits: scarce
-#    use: hard reasoning and tricky debugging
-senapati:
-  agent: ""                  # opencode custom-agent name, optional
-  directory: ""              # optional session working directory
-  # The model Senapati runs on. Leave it unset and sessions made through the
-  # API use the opencode SERVER's default model (often a free one) - not the
-  # one you pick in the opencode TUI, which is stored client-side.
+  signingSecret: ""          # or set LINEAR_SIGNING_SECRET
+  listenAddr: ":8080"        # where Linear's webhook is delivered
+  botUserID: ""              # Senapati's own Linear user id (actor.id on its comments)
+  botName: "Senapati"
+  botHandle: ""              # what comments @-mention it as, without the @
+
+bridge:
+  listenAddr: "127.0.0.1:4098"  # the API the main session's tools use; loopback only
+  store: mahamantri.db
+  # discoveryFile: ""        # default $XDG_STATE_HOME/samrajya/bridge.json
+  # mainDirectory: ""        # where the main session runs; default: the workspace
+  trustedUserIDs: []         # Linear users who may ask for work; empty = everyone
+
+# mode: opencode only.
+opencode:
+  serverURL: "http://localhost:4096"
+  password: ""               # or set OPENCODE_SERVER_PASSWORD
+  agent: ""
   model:
-    providerID: ""           # e.g. openai
-    id: ""                   # e.g. gpt-6-sol
-  # Role text sent to Senapati as its first message (with its identity and the
-  # service URLs). Agent-file frontmatter is ignored.
-  instructionsFile: "../senapati/senapati.md"
-  # Fraction of the model's context window that triggers a fresh Senapati
-  # session. On claude, ~70-95k of every session is fixed (tools, system
-  # prompt, MCP servers) - about a third of 200k - so use 0.75 there.
-  rotationThreshold: 0.4
-  # claude harness: when Senapati hits a usage limit, switch it to this model
-  # (another provider, e.g. a Codex model) and continue at once.
-  fallbackModel: ""
-  # Senapati's tools are restricted to curl to mahamantri, jq and the Linear
-  # MCP tools (linear_*), so the work can only go to a sainik. Rules added here
-  # come after those (the last matching rule wins); "ask" is not allowed -
-  # nobody is there to answer it.
-  extraPermissions: []
-  #  - {action: "github_*", resource: "*", effect: allow}
-# Only for harness: claude.
-claude:
-  binary: claude             # path to Claude Code
-  idleExit: 10m              # a session's process exits after this long idle; the next message resumes it
-  usageWarnAt: 0.9           # TUI warns when a subscription window is this full
-  senapatiAllowedTools: []   # added to Senapati's allowlist (curl to mahamantri, jq, mcp__linear)
-  senapatiDeniedTools: []    # e.g. [mcp__linear__delete_comment]; a denial wins over any allow
-  sainikArgs: []             # extra claude flags for every sainik, e.g. ["--effort", "high"]
-  # Context windows (tokens) of models Claude Code doesn't know - it assumes
-  # 200k for anything routed through a proxy. Used for Senapati's rotation.
-  contextWindows: {}
-  #  gpt-6-sol: 272000
+    providerID: ""
+    id: ""
+  # instructionsFile: ../senapati/senapati.md

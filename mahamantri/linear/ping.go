@@ -3,7 +3,6 @@ package linear
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/gopal-lohar/samrajya/mahamantri/harness"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -184,90 +183,6 @@ func ownComment(body []byte, self Identity) (threadID, issue string, ok bool) {
 	return firstNonEmpty(env.Data.ParentID, env.Data.ID), firstNonEmpty(env.Data.Issue.Identifier, env.Data.IssueID), true
 }
 
-// Sainik is what mahamantri knows about a sainik working on the issue.
-type Sainik struct {
-	Label     string
-	SessionID string
-	Status    string // running | idle | blocked | manual
-	Phase     string
-}
-
-// Format is the message Senapati receives for p. It is worded as what it is -
-// a notification that the issue has news, to be handled against the issue as
-// a whole - because a bare comment pasted into Senapati reads like a person
-// chatting with it. It ends with the exact commands for routing it on the
-// harness in use (none if cmds is nil): left to work out the API itself,
-// Senapati probed for endpoints that don't exist and gave up.
-func Format(p Ping, sainiks []Sainik, cmds harness.Commands) string {
-	var b strings.Builder
-	what := "mentioned you in a comment"
-	if p.Kind == "reply" {
-		what = "replied in a comment thread you are part of"
-	}
-	fmt.Fprintf(&b, "[Linear ping] %s - %s %s.\n", issueLabel(p), p.Author, what)
-	fmt.Fprintf(&b, "Comment:\n%s\n", quote(truncate(strings.TrimSpace(p.Body), 2000)))
-	if p.URL != "" {
-		fmt.Fprintf(&b, "Link: %s\n", p.URL)
-	}
-	b.WriteString("\n")
-
-	if len(sainiks) == 0 {
-		fmt.Fprintf(&b, "Sainik for %s: none yet.\n", p.Issue)
-	} else {
-		fmt.Fprintf(&b, "Sainik for %s:\n", p.Issue)
-		for _, s := range sainiks {
-			fmt.Fprintf(&b, "- %q (session %s): %s", s.Label, s.SessionID, describeStatus(s.Status))
-			if s.Phase != "" {
-				fmt.Fprintf(&b, ", phase %q", s.Phase)
-			}
-			b.WriteString("\n")
-		}
-	}
-
-	fmt.Fprintf(&b, "\nThis is a notification, not a person chatting with you. Handle it as \"Handling a Linear ping\" says: "+
-		"re-read %s and this thread on Linear, then route it - to the sainik (queued if it is busy and this is not urgent, "+
-		"interrupt only if it is), to a new sainik if there is none and work is asked for, or answer on Linear yourself "+
-		"if no work is needed. Do not investigate it yourself, and do not wait for anything: end your turn once it is routed.\n", p.Issue)
-
-	if cmds != nil {
-		b.WriteString("\nCommands (fill in the <...> parts; run them exactly like this - plain curl, optionally piped to jq):\n")
-		if len(sainiks) == 0 {
-			fmt.Fprintf(&b, "Start its sainik with its task:\n%s\n", cmds.Start(p.Issue))
-		} else {
-			id := sainiks[0].SessionID
-			fmt.Fprintf(&b, "Send its sainik what is new (queued: it gets it after its current turn):\n%s\n", cmds.Prompt(id))
-			fmt.Fprintf(&b, "Only if this cannot wait, stop it first:\n%s\n", cmds.Interrupt(id))
-			fmt.Fprintf(&b, "Is it running right now:\n%s\n", cmds.Running(id))
-		}
-	}
-	return b.String()
-}
-
-func describeStatus(status string) string {
-	switch status {
-	case "running":
-		return "running (busy with a turn)"
-	case "idle":
-		return "idle (waiting for its next instruction)"
-	case "blocked":
-		return "blocked (needs a decision)"
-	case "manual":
-		return "being used by a person directly - leave it alone"
-	}
-	return status
-}
-
-func issueLabel(p Ping) string {
-	if p.IssueTitle == "" {
-		return p.Issue
-	}
-	return fmt.Sprintf("%s (%q)", p.Issue, p.IssueTitle)
-}
-
-func quote(s string) string {
-	return "> " + strings.ReplaceAll(s, "\n", "\n> ")
-}
-
 func firstNonEmpty(vals ...string) string {
 	for _, v := range vals {
 		if v != "" {
@@ -275,11 +190,4 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
-}
-
-func truncate(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	return s[:max] + "..."
 }

@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -237,15 +238,13 @@ func (s *Server) status(w http.ResponseWriter) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// events long-polls for pending events after a sequence number. The wake
-// channel is taken before the store is read, so an event stored in between
-// still wakes this request.
-func (s *Server) events(w http.ResponseWriter, r *http.Request) {
-	after, _ := strconv.ParseUint(r.URL.Query().Get("after"), 10, 64)
-	wait, _ := time.ParseDuration(r.URL.Query().Get("wait") + "s")
-	if wait > maxWait {
-		wait = maxWait
-	}
+// WaitPending returns the pending events after seq, waiting up to wait for
+// one to arrive. The wake channel is taken before the store is read, so an
+// event stored in between still ends the wait.
+func (s *Server) WaitPending(ctx context.Context, after uint64, wait time.Duration) ([]Event, error) {
+	s.mu.Lock()
+	s.init()
+	s.mu.Unlock()
 	deadline := time.NewTimer(wait)
 	defer deadline.Stop()
 	for {
@@ -253,21 +252,30 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 		wake := s.wake
 		s.mu.Unlock()
 		pending, err := s.Store.Pending(after)
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		if len(pending) > 0 || wait <= 0 {
-			writeJSON(w, http.StatusOK, map[string]any{"events": nonNil(pending)})
-			return
+		if err != nil || len(pending) > 0 || wait <= 0 {
+			return pending, err
 		}
 		select {
 		case <-wake:
 		case <-deadline.C:
 			wait = 0
-		case <-r.Context().Done():
-			return
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		}
+	}
+}
+
+// events long-polls for pending events after a sequence number.
+func (s *Server) events(w http.ResponseWriter, r *http.Request) {
+	after, _ := strconv.ParseUint(r.URL.Query().Get("after"), 10, 64)
+	wait, _ := time.ParseDuration(r.URL.Query().Get("wait") + "s")
+	pending, err := s.WaitPending(r.Context(), after, min(wait, maxWait))
+	switch {
+	case r.Context().Err() != nil:
+	case err != nil:
+		writeErr(w, http.StatusInternalServerError, err.Error())
+	default:
+		writeJSON(w, http.StatusOK, map[string]any{"events": nonNil(pending)})
 	}
 }
 

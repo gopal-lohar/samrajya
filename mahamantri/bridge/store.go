@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 	"time"
@@ -250,41 +249,19 @@ func (s *Store) Add(threadID, issue string) error {
 	})
 }
 
-// ImportThreads adds the threads in a managed-mode thread file (see
-// linear.Threads) once; later calls do nothing. A missing file is nothing
-// to import.
-func (s *Store) ImportThreads(path string) (int, error) {
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, err
-	}
-	var legacy map[string]struct {
-		Issue string `json:"issue"`
-	}
-	if err := json.Unmarshal(data, &legacy); err != nil {
-		return 0, fmt.Errorf("%s: %w", path, err)
-	}
-	n := 0
-	err = s.db.Update(func(tx *bolt.Tx) error {
-		meta, threads := tx.Bucket(bMeta), tx.Bucket(bThreads)
-		marker := []byte("imported:" + path)
-		if meta.Get(marker) != nil {
-			return nil
-		}
-		for id, t := range legacy {
-			if threads.Get([]byte(id)) == nil {
-				if err := threads.Put([]byte(id), []byte(t.Issue)); err != nil {
-					return err
-				}
-				n++
-			}
-		}
-		return meta.Put(marker, []byte(s.now().Format(time.RFC3339)))
+// Meta returns a stored setting, "" if unset.
+func (s *Store) Meta(key string) string {
+	var v string
+	s.db.View(func(tx *bolt.Tx) error {
+		v = string(tx.Bucket(bMeta).Get([]byte("x:" + key)))
+		return nil
 	})
-	return n, err
+	return v
+}
+
+// SetMeta stores a setting, e.g. which opencode session is the main one.
+func (s *Store) SetMeta(key, value string) error {
+	return s.db.Update(func(tx *bolt.Tx) error { return tx.Bucket(bMeta).Put([]byte("x:"+key), []byte(value)) })
 }
 
 // Pending lists the events not yet accepted with Seq above after, oldest

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server as HTTPServer, ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -11,7 +11,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { z } from 'zod';
-import { createChannel, render } from '../src/channel.js';
+import { createChannel, instructions, render } from '../src/channel.js';
 import type { Event } from '../src/channel.js';
 
 const channelSchema = z.object({
@@ -140,6 +140,11 @@ async function until(cond: () => boolean, what: string, ms = 5000) {
   }
 }
 
+test('the instructions are senapati/senapati.md', async () => {
+  const role = await readFile(fileURLToPath(new URL('../../../../senapati/senapati.md', import.meta.url)), 'utf8');
+  assert.equal(instructions, role.trimEnd());
+});
+
 test('renders a ping with its routing metadata and trust', () => {
   const r = render(event('linear:c1', 1, { body: 'line one\nline two', url: 'https://linear.app/x' }));
   assert.match(r.content, /Asha mentioned you on ENG-1 \("Fix login"\)/);
@@ -243,6 +248,20 @@ test('a session in the main directory attaches', async (t) => {
   await until(() => bridge.requests.some((r) => r.path === '/v1/attach'), 'attach in main directory');
 });
 
+test('a session marked main attaches wherever it runs (opencode)', async (t) => {
+  const bridge = new FakeBridge();
+  await bridge.listen();
+  t.after(() => bridge.close());
+  const dir = await mkdtemp(join(tmpdir(), 'samrajya-oc-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const discoveryPath = join(dir, 'bridge.json');
+  await writeFile(discoveryPath, JSON.stringify({ url: bridge.url, token: bridge.token, mainDirectory: '/somewhere/else' }));
+  const channel = createChannel({ discoveryPath, directory: dir, main: true, pollSeconds: 1 });
+  t.after(() => channel.stop());
+  channel.start();
+  await until(() => bridge.requests.some((r) => r.path === '/v1/attach'), 'attach when marked main');
+});
+
 test('re-reads the discovery file after mahamantri restarts with a new token, without re-sending', async (t) => {
   const bridge = new FakeBridge();
   bridge.events.push(event('linear:c1', 1));
@@ -263,7 +282,7 @@ test('waits for mahamantri to come up and says so meanwhile', async (t) => {
   await rm(discoveryPath);
   const status = await call('samrajya_status');
   assert.equal(status.isError, true);
-  assert.match(JSON.stringify(status.content), /not running in native mode/);
+  assert.match(JSON.stringify(status.content), /mahamantri is not running/);
   bridge.events.push(event('linear:c1', 1));
   await writeDiscovery();
   assert.equal((await call('samrajya_status')).isError, undefined);

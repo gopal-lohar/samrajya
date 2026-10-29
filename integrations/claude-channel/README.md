@@ -1,6 +1,6 @@
 # Samrajya channel plugin
 
-The Claude Code side of Mahamantri's **native mode**. Your main assistant is an
+The session side of Mahamantri's bridge. In `mode: claude` your main assistant is an
 ordinary interactive Claude Code session that you start, talk to in the terminal
 or from your phone through Remote Control, and that does the work itself. This
 plugin runs inside that session and:
@@ -19,7 +19,7 @@ ping never creates a second task.
 
 ## How it connects
 
-Mahamantri (`mode: native`) serves a local, token-authenticated API. On every
+Mahamantri serves a local, token-authenticated API. On every
 start it writes the address and a fresh token to its discovery file, by default
 `$XDG_STATE_HOME/samrajya/bridge.json` (`~/.local/state/...`), readable only by
 you. The plugin reads that file and rereads it whenever Mahamantri restarts.
@@ -42,7 +42,7 @@ cd /path/to/your/workspace   # where the main session will run
 claude plugin install samrajya@samrajya --scope local
 ```
 
-Only a session running in Mahamantri's `native.mainDirectory` (default: the
+Only a session running in Mahamantri's `bridge.mainDirectory` (default: the
 workspace) attaches as the main session by itself. Claude Code doesn't tell a
 plugin whether its session enabled the channel, but the plugin runs in its
 session's directory, so a session elsewhere stays passive unless you tell it
@@ -71,7 +71,7 @@ replaces Anthropic's default allowlist of official channel plugins.
 
 ### Start the main session
 
-Start Mahamantri in native mode first, then the session. Run it from your
+Start Mahamantri first, then the session. Run it from your
 workspace directory so project instructions apply:
 
 ```sh
@@ -81,6 +81,28 @@ claude --bg -n samrajya --channels plugin:samrajya@samrajya --remote-control Sam
 Remote Control requires Claude Code to talk to `api.anthropic.com` directly.
 Don't set `ANTHROPIC_BASE_URL` to a proxy for this session. Mid-turn, events
 wait until the turn ends; to stop or steer a turn at once, use Remote Control.
+
+## In opencode mode
+
+In `mode: opencode`, Mahamantri prompts the opencode main session with each
+ping itself, so no channel is involved. The session still needs the bridge
+tools, so add the bundled server to opencode's MCP configuration (for example
+`opencode.json`) and mark it as the main session's:
+
+```json
+{
+  "mcp": {
+    "samrajya": {
+      "type": "local",
+      "command": ["node", "/absolute/path/to/samrajya/integrations/claude-channel/plugin/server.mjs"],
+      "environment": { "SAMRAJYA_MAIN": "1" }
+    }
+  }
+}
+```
+
+`SAMRAJYA_MAIN=1` lets it attach as the main session wherever opencode runs it.
+Configure it only for the opencode server that hosts the main session.
 
 ## Development
 
