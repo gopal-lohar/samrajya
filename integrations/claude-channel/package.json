@@ -1,6 +1,6 @@
 {
-  "name": "@samrajya/claude-channel-probe",
-  "version": "0.0.1",
+  "name": "@samrajya/claude-channel",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -10,8 +10,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "tsc",
-    "test": "pnpm build && node --test dist/test/*.test.js",
-    "start": "node dist/src/server.js"
+    "bundle": "esbuild src/main.ts --bundle --platform=node --format=esm --target=node24 --outfile=plugin/server.mjs --banner:js=\"import{createRequire}from'node:module';const require=createRequire(import.meta.url);\"",
+    "test": "rm -rf dist && tsc && pnpm bundle && node --test dist/test/*.test.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.2",
@@ -19,6 +19,7 @@
   },
   "devDependencies": {
     "@types/node": "24.19.2",
+    "esbuild": "0.28.2",
     "typescript": "7.0.2"
   }
 }
