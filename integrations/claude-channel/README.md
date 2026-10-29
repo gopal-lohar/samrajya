@@ -78,6 +78,22 @@ workspace directory so project instructions apply:
 claude --bg -n samrajya --channels plugin:samrajya@samrajya --remote-control Samrajya
 ```
 
+To restart it, for example after changing its settings or your login, use
+`integrations/claude-channel/restart-main.sh`. It stops every session with
+that name in the main directory by id, then starts a new one there. Only one
+session holds the main attachment, so a leftover session keeps receiving pings
+while the new one stays passive. `claude stop <name>` doesn't reliably find a
+session when several share the name.
+
+The main session does real work unattended, so allow the tools it needs in the
+workspace's local settings (`.claude/settings.local.json`); otherwise auto mode
+may refuse, say, posting a Linear reply and leave the task blocked until you
+approve it:
+
+```json
+{ "permissions": { "allow": ["mcp__plugin_samrajya_samrajya", "mcp__linear"] } }
+```
+
 Remote Control requires Claude Code to talk to `api.anthropic.com` directly.
 Don't set `ANTHROPIC_BASE_URL` to a proxy for this session. Mid-turn, events
 wait until the turn ends; to stop or steer a turn at once, use Remote Control.
