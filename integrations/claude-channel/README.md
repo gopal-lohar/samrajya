@@ -85,14 +85,11 @@ session holds the main attachment, so a leftover session keeps receiving pings
 while the new one stays passive. `claude stop <name>` doesn't reliably find a
 session when several share the name.
 
-The main session does real work unattended, so allow the tools it needs in the
-workspace's local settings (`.claude/settings.local.json`); otherwise auto mode
-may refuse, say, posting a Linear reply and leave the task blocked until you
-approve it:
-
-```json
-{ "permissions": { "allow": ["mcp__plugin_samrajya_samrajya", "mcp__linear"] } }
-```
+The main session does real work unattended, so the script starts it with
+`--dangerously-skip-permissions`. Otherwise a prompt, for example to post a
+Linear reply, leaves the task blocked until someone answers it. Claude Code
+asks you to accept that mode's disclaimer once, interactively:
+`claude --dangerously-skip-permissions`, then `/exit`.
 
 Remote Control requires Claude Code to talk to `api.anthropic.com` directly.
 Don't set `ANTHROPIC_BASE_URL` to a proxy for this session. Mid-turn, events
