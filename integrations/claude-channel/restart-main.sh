@@ -25,4 +25,4 @@ claude agents --json | jq -r --arg name "$name" '.[] | select(.name == $name) | 
   done
 
 cd "$dir"
-exec claude --bg -n "$name" --channels plugin:samrajya@samrajya --remote-control "$rc_name"
+exec claude --bg -n "$name" --dangerously-skip-permissions --channels plugin:samrajya@samrajya --remote-control "$rc_name"
