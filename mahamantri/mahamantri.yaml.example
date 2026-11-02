@@ -17,6 +17,11 @@ linear:
   botUserID: ""              # Senapati's own Linear user id (actor.id on its comments)
   botName: "Senapati"
   botHandle: ""              # what comments @-mention it as, without the @
+  # A Linear API key of Senapati's account, or set LINEAR_API_KEY. Optional:
+  # with it, each ping gets a reaction when stored (receivedEmoji, default 👀),
+  # the main session can react instead of replying, and Senapati's Linear
+  # status shows whether it is online.
+  apiKey: ""
 
 bridge:
   listenAddr: "127.0.0.1:4098"  # the API the main session's tools use; loopback only
