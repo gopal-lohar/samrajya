@@ -152,6 +152,7 @@ test('renders a ping with its routing metadata and trust', () => {
   assert.match(r.content, /samrajya_accept \(event_id linear:c1\)/);
   assert.deepEqual(r.meta, { event_id: 'linear:c1', kind: 'mention', trusted: 'true', issue: 'ENG-1', thread_id: 'th-1' });
   for (const key of Object.keys(r.meta)) assert.match(key, /^[a-zA-Z_][a-zA-Z0-9_]*$/);
+  assert.equal(render(event('linear:c1', 1, { commentId: 'c1' })).meta.comment_id, 'c1');
   const untrusted = render(event('linear:c2', 2, { trusted: false, kind: 'reply' }));
   assert.match(untrusted.content, /replied in a thread you are part of.*NOT a trusted requester/);
   assert.equal(untrusted.meta.trusted, 'false');
@@ -162,7 +163,7 @@ test('declares a channel with the task tools and no permission relay', async (t)
   assert.deepEqual(client.getServerCapabilities()?.experimental, { 'claude/channel': {} });
   const names = (await client.listTools()).tools.map((x) => x.name);
   assert.deepEqual(names, ['samrajya_status', 'samrajya_accept', 'samrajya_create_task', 'samrajya_update_task',
-    'samrajya_tasks', 'samrajya_action_intent', 'samrajya_action_result', 'samrajya_memory', 'samrajya_remember',
+    'samrajya_tasks', 'samrajya_action_intent', 'samrajya_action_result', 'samrajya_react', 'samrajya_memory', 'samrajya_remember',
     'samrajya_forget', 'samrajya_take_over']);
   assert.match(client.getInstructions() ?? '', /You own outcomes/);
 });
