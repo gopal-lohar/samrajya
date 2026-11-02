@@ -68,6 +68,9 @@ func run(configPath string) error {
 		return err
 	}
 	srv := &bridge.Server{Store: store, Token: token, Logger: logger}
+	if cfg.Linear.APIKey != "" {
+		srv.Linear, srv.Received = &linear.API{Key: cfg.Linear.APIKey}, cfg.Linear.ReceivedEmoji
+	}
 	if cfg.Brain != "" {
 		if srv.Brain, err = brain.Open(cfg.Brain, func() []string { return projects(cfg.Workspace) }); err != nil {
 			return fmt.Errorf("brain %s: %w", cfg.Brain, err)
@@ -112,6 +115,8 @@ func run(configPath string) error {
 	if oc != nil {
 		go oc.deliver(ctx, srv)
 	}
+	statusDone := make(chan struct{})
+	go func() { srv.WatchStatus(ctx, 20*time.Second); close(statusDone) }()
 
 	rec, err := store.Recovery()
 	if err != nil {
@@ -134,6 +139,8 @@ func run(configPath string) error {
 	defer cancel()
 	linearSrv.Shutdown(shutdownCtx)
 	bridgeSrv.Shutdown(shutdownCtx)
+	stop()
+	<-statusDone // leaves Senapati's status offline
 	if err != nil && err != http.ErrServerClosed {
 		return err
 	}

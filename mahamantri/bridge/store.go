@@ -195,21 +195,27 @@ func (s *Store) Close() error { return s.db.Close() }
 // Ingest keeps a ping. A comment already in the inbox - Linear redelivering
 // it - is left as it is.
 func (s *Store) Ingest(p linear.Ping, delivery string) error {
+	_, err := s.IngestNew(p, delivery)
+	return err
+}
+
+// IngestNew is Ingest that also reports whether the ping was new rather than
+// a redelivery.
+func (s *Store) IngestNew(p linear.Ping, delivery string) (bool, error) {
 	id := "linear:" + p.CommentID
 	if p.CommentID == "" {
 		if delivery == "" {
-			return errors.New("ping has neither a comment id nor a delivery id")
+			return false, errors.New("ping has neither a comment id nor a delivery id")
 		}
 		id = "linear-delivery:" + delivery
 	}
-	_, err := s.ingest(Event{
+	return s.ingest(Event{
 		ID: id, Source: "linear", Kind: p.Kind,
 		Issue: p.Issue, IssueID: p.IssueID, IssueTitle: p.IssueTitle,
 		CommentID: p.CommentID, ThreadID: p.ThreadID,
 		Author: p.Author, AuthorID: p.AuthorID, Trusted: s.trusted == nil || s.trusted[p.AuthorID],
 		Body: truncate(p.Body, maxBody), URL: p.URL, Delivery: delivery,
 	})
-	return err
 }
 
 func (s *Store) ingest(e Event) (bool, error) {

@@ -41,6 +41,11 @@ type Server struct {
 	// Brain, if set, is served under /brain (see brain.Routes): any client
 	// may read it, only the attached one change it.
 	Brain *brain.Store
+	// Linear, if set, acts on Linear as Senapati: it reacts to each new ping
+	// with Received once it is stored, serves /v1/react, and WatchStatus
+	// keeps Senapati's status current.
+	Linear   Linear
+	Received string
 
 	mu       sync.Mutex
 	holder   string // attachment id
@@ -65,9 +70,19 @@ func (s *Server) init() {
 	}
 }
 
-// Ingest stores a ping and wakes any waiting feed request.
+// Linear is what the server does on Linear itself (linear.API).
+type Linear interface {
+	React(ctx context.Context, commentID, emoji string) error
+	SetStatus(ctx context.Context, emoji, label string) error
+}
+
+// Ingest stores a ping and wakes any waiting feed request. A new ping gets
+// the Received reaction, so the person sees at once that it arrived even
+// while the main session is busy or offline; that is best effort and never
+// fails the ingest.
 func (s *Server) Ingest(p linear.Ping, delivery string) error {
-	if err := s.Store.Ingest(p, delivery); err != nil {
+	created, err := s.Store.IngestNew(p, delivery)
+	if err != nil {
 		return err
 	}
 	s.mu.Lock()
@@ -75,6 +90,15 @@ func (s *Server) Ingest(p linear.Ping, delivery string) error {
 	close(s.wake)
 	s.wake = make(chan struct{})
 	s.mu.Unlock()
+	if created && s.Linear != nil && s.Received != "" && p.CommentID != "" {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := s.Linear.React(ctx, p.CommentID, s.Received); err != nil {
+				s.Logger.Printf("linear: could not react to comment %s: %v", p.CommentID, err)
+			}
+		}()
+	}
 	return nil
 }
 
@@ -145,6 +169,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				reply(w, t, err)
 			}
 		})
+	case r.Method == http.MethodPost && path == "/v1/react":
+		s.withHolder(w, r, s.react)
 	case r.Method == http.MethodPost && path == "/v1/actions":
 		s.withHolder(w, r, func(w http.ResponseWriter, r *http.Request) {
 			var a Action
@@ -220,6 +246,87 @@ func (s *Server) withHolder(w http.ResponseWriter, r *http.Request, next http.Ha
 		return
 	}
 	next(w, r)
+}
+
+// react adds an emoji to a comment as Senapati, for the main session: an
+// acknowledgment that needs no reply.
+func (s *Server) react(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		CommentID string `json:"commentId"`
+		Emoji     string `json:"emoji"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	switch {
+	case s.Linear == nil:
+		writeErr(w, http.StatusNotImplemented, "mahamantri has no Linear API key (linear.apiKey), so it cannot react")
+	case body.CommentID == "" || body.Emoji == "":
+		writeErr(w, http.StatusBadRequest, "commentId and emoji are required")
+	default:
+		if err := s.Linear.React(r.Context(), body.CommentID, body.Emoji); err != nil {
+			writeErr(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"reacted": true})
+	}
+}
+
+// Status is what Senapati's Linear status says: online or offline by
+// whether a main session is attached, and the issue it is working on.
+type Status struct{ Emoji, Label string }
+
+var offline = Status{"💤", "Offline - pings wait until I'm back"}
+
+func (s *Server) currentStatus() Status {
+	s.mu.Lock()
+	s.init()
+	live := s.attachment().Live
+	s.mu.Unlock()
+	if !live {
+		return offline
+	}
+	if rec, err := s.Store.Recovery(); err == nil {
+		for _, t := range rec.Open {
+			if t.Status == "working" && t.Issue != "" {
+				return Status{"🟢", "Working on " + t.Issue}
+			}
+		}
+	}
+	return Status{"🟢", "Online"}
+}
+
+// WatchStatus keeps Senapati's Linear status in step with currentStatus,
+// checking every interval, until ctx ends; a failed update is retried at the
+// next check. On the way out it leaves the status offline.
+func (s *Server) WatchStatus(ctx context.Context, every time.Duration) {
+	if s.Linear == nil {
+		return
+	}
+	var shown Status
+	set := func(ctx context.Context, st Status) {
+		if st == shown {
+			return
+		}
+		if err := s.Linear.SetStatus(ctx, st.Emoji, st.Label); err != nil {
+			s.Logger.Printf("linear: could not set status %q: %v", st.Label, err)
+			return
+		}
+		shown = st
+	}
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		set(ctx, s.currentStatus())
+		select {
+		case <-ctx.Done():
+			off, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			set(off, offline)
+			cancel()
+			return
+		case <-t.C:
+		}
+	}
 }
 
 func (s *Server) status(w http.ResponseWriter) {

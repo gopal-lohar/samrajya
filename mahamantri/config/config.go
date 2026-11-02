@@ -36,6 +36,13 @@ type Config struct {
 		BotUserID     string `yaml:"botUserID"`
 		BotName       string `yaml:"botName"`
 		BotHandle     string `yaml:"botHandle"`
+		// APIKey is a Linear API key of Senapati's own account (default:
+		// $LINEAR_API_KEY). With it, mahamantri reacts to each ping as it
+		// arrives, lets the main session react instead of replying, and
+		// keeps Senapati's Linear status online or offline. Optional.
+		APIKey string `yaml:"apiKey"`
+		// ReceivedEmoji is the reaction a ping gets once stored. Default 👀.
+		ReceivedEmoji string `yaml:"receivedEmoji"`
 	} `yaml:"linear"`
 	Bridge struct {
 		// ListenAddr is the bridge API the main session's tools talk to.
@@ -106,6 +113,12 @@ func Load(path string) (Config, error) {
 	}
 	if c.Linear.SigningSecret == "" {
 		c.Linear.SigningSecret = os.Getenv("LINEAR_SIGNING_SECRET")
+	}
+	if c.Linear.APIKey == "" {
+		c.Linear.APIKey = os.Getenv("LINEAR_API_KEY")
+	}
+	if c.Linear.ReceivedEmoji == "" {
+		c.Linear.ReceivedEmoji = "👀"
 	}
 	if c.Linear.BotUserID != "" && c.Linear.BotName == "" {
 		c.Linear.BotName = "Senapati"
