@@ -60,3 +60,28 @@ func TestAPIReactsAndSetsStatusAsTheKeysUser(t *testing.T) {
 		t.Errorf("bad key: %v", err)
 	}
 }
+
+func TestAPICommentsInAThreadAndLooksUpHandles(t *testing.T) {
+	var got []map[string]any
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]any
+		json.NewDecoder(r.Body).Decode(&req)
+		got = append(got, req)
+		if strings.Contains(req["query"].(string), "commentCreate") {
+			w.Write([]byte(`{"data":{"commentCreate":{"success":true}}}`))
+		} else {
+			w.Write([]byte(`{"data":{"user":{"displayName":"asha"}}}`))
+		}
+	}))
+	defer ts.Close()
+	a := &API{Key: "k", URL: ts.URL}
+	if err := a.Comment(context.Background(), "iss", "th", "hi"); err != nil {
+		t.Fatal(err)
+	}
+	if in := got[0]["variables"].(map[string]any)["input"].(map[string]any); in["issueId"] != "iss" || in["parentId"] != "th" || in["body"] != "hi" {
+		t.Errorf("comment input = %v", in)
+	}
+	if h, err := a.Handle(context.Background(), "u1"); err != nil || h != "asha" {
+		t.Errorf("handle = %q, %v", h, err)
+	}
+}

@@ -80,6 +80,8 @@ type Event struct {
 
 	AcceptedAt *time.Time `json:"acceptedAt,omitempty"`
 	TaskID     string     `json:"taskId,omitempty"`
+	// NudgedAt is when the person was told the ping is still waiting.
+	NudgedAt *time.Time `json:"nudgedAt,omitempty"`
 }
 
 // Task is a piece of work the main session owns: what was asked, where it
@@ -295,6 +297,20 @@ func (s *Store) Event(id string) (Event, error) {
 	var e Event
 	err := s.db.View(func(tx *bolt.Tx) error { return getJSON(tx.Bucket(bEvents), id, &e) })
 	return e, err
+}
+
+// MarkNudged records that the person was told event id is still waiting.
+func (s *Store) MarkNudged(id string) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bEvents)
+		var e Event
+		if err := getJSON(b, id, &e); err != nil {
+			return err
+		}
+		now := s.now()
+		e.NudgedAt = &now
+		return putJSON(b, id, e)
+	})
 }
 
 // Accept attaches events to a task - an existing one (taskID) or one created

@@ -116,7 +116,7 @@ func run(configPath string) error {
 		go oc.deliver(ctx, srv)
 	}
 	statusDone := make(chan struct{})
-	go func() { srv.WatchStatus(ctx, 20*time.Second); close(statusDone) }()
+	go func() { srv.Watch(ctx, 20*time.Second, cfg.Linear.NudgeAfter); close(statusDone) }()
 
 	rec, err := store.Recovery()
 	if err != nil {

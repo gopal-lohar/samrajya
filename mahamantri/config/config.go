@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -38,11 +39,16 @@ type Config struct {
 		BotHandle     string `yaml:"botHandle"`
 		// APIKey is a Linear API key of Senapati's own account (default:
 		// $LINEAR_API_KEY). With it, mahamantri reacts to each ping as it
-		// arrives, lets the main session react instead of replying, and
-		// keeps Senapati's Linear status online or offline. Optional.
+		// arrives, shows on Senapati's Linear status when it is offline or
+		// blocked, and tells the person when a ping waits too long.
+		// Optional.
 		APIKey string `yaml:"apiKey"`
 		// ReceivedEmoji is the reaction a ping gets once stored. Default 👀.
 		ReceivedEmoji string `yaml:"receivedEmoji"`
+		// NudgeAfter is how long a ping may wait unaccepted before its author
+		// is told it is queued. Default 15m; 0s turns nudges off.
+		Nudge      string        `yaml:"nudgeAfter"`
+		NudgeAfter time.Duration `yaml:"-"`
 	} `yaml:"linear"`
 	Bridge struct {
 		// ListenAddr is the bridge API the main session's tools talk to.
@@ -119,6 +125,12 @@ func Load(path string) (Config, error) {
 	}
 	if c.Linear.ReceivedEmoji == "" {
 		c.Linear.ReceivedEmoji = "👀"
+	}
+	c.Linear.NudgeAfter = 15 * time.Minute
+	if c.Linear.Nudge != "" {
+		if c.Linear.NudgeAfter, err = time.ParseDuration(c.Linear.Nudge); err != nil || c.Linear.NudgeAfter < 0 {
+			return Config{}, fmt.Errorf("config %s: linear.nudgeAfter %q is not a duration like 15m", abs, c.Linear.Nudge)
+		}
 	}
 	if c.Linear.BotUserID != "" && c.Linear.BotName == "" {
 		c.Linear.BotName = "Senapati"

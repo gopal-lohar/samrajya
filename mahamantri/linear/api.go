@@ -13,9 +13,9 @@ import (
 )
 
 // API is the little of Linear's GraphQL API mahamantri uses itself, as
-// Senapati (the key's user): reacting to comments and setting Senapati's
-// status. The main session does everything else through its own Linear
-// tools.
+// Senapati (the key's user): marking pings received, setting Senapati's
+// status and telling the person a ping is still waiting. The main session
+// does everything else through its own Linear tools.
 type API struct {
 	Key string
 	// URL defaults to Linear's GraphQL endpoint.
@@ -125,4 +125,36 @@ func (a *API) viewer(ctx context.Context) (string, error) {
 	}
 	a.me = out.Viewer.ID
 	return a.me, nil
+}
+
+// Comment posts body on an issue as Senapati, in the thread parentID if set.
+func (a *API) Comment(ctx context.Context, issueID, parentID, body string) error {
+	input := map[string]string{"issueId": issueID, "body": body}
+	if parentID != "" {
+		input["parentId"] = parentID
+	}
+	var out struct {
+		CommentCreate struct {
+			Success bool `json:"success"`
+		} `json:"commentCreate"`
+	}
+	err := a.do(ctx, `mutation($input: CommentCreateInput!) { commentCreate(input: $input) { success } }`,
+		map[string]any{"input": input}, &out)
+	if err == nil && !out.CommentCreate.Success {
+		err = errors.New("linear api: comment not created")
+	}
+	return err
+}
+
+// Handle is what a comment @-mentions a user as.
+func (a *API) Handle(ctx context.Context, userID string) (string, error) {
+	var out struct {
+		User struct {
+			DisplayName string `json:"displayName"`
+		} `json:"user"`
+	}
+	if err := a.do(ctx, `query($id: String!) { user(id: $id) { displayName } }`, map[string]any{"id": userID}, &out); err != nil {
+		return "", err
+	}
+	return out.User.DisplayName, nil
 }

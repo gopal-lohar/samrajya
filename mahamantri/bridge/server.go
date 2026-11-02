@@ -42,8 +42,8 @@ type Server struct {
 	// may read it, only the attached one change it.
 	Brain *brain.Store
 	// Linear, if set, acts on Linear as Senapati: it reacts to each new ping
-	// with Received once it is stored, serves /v1/react, and WatchStatus
-	// keeps Senapati's status current.
+	// with Received once it is stored, and Watch keeps Senapati's status
+	// and nudges about pings left waiting.
 	Linear   Linear
 	Received string
 
@@ -74,6 +74,8 @@ func (s *Server) init() {
 type Linear interface {
 	React(ctx context.Context, commentID, emoji string) error
 	SetStatus(ctx context.Context, emoji, label string) error
+	Comment(ctx context.Context, issueID, parentID, body string) error
+	Handle(ctx context.Context, userID string) (string, error)
 }
 
 // Ingest stores a ping and wakes any waiting feed request. A new ping gets
@@ -169,8 +171,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				reply(w, t, err)
 			}
 		})
-	case r.Method == http.MethodPost && path == "/v1/react":
-		s.withHolder(w, r, s.react)
 	case r.Method == http.MethodPost && path == "/v1/actions":
 		s.withHolder(w, r, func(w http.ResponseWriter, r *http.Request) {
 			var a Action
@@ -248,62 +248,48 @@ func (s *Server) withHolder(w http.ResponseWriter, r *http.Request, next http.Ha
 	next(w, r)
 }
 
-// react adds an emoji to a comment as Senapati, for the main session: an
-// acknowledgment that needs no reply.
-func (s *Server) react(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		CommentID string `json:"commentId"`
-		Emoji     string `json:"emoji"`
-	}
-	if !decode(w, r, &body) {
-		return
-	}
-	switch {
-	case s.Linear == nil:
-		writeErr(w, http.StatusNotImplemented, "mahamantri has no Linear API key (linear.apiKey), so it cannot react")
-	case body.CommentID == "" || body.Emoji == "":
-		writeErr(w, http.StatusBadRequest, "commentId and emoji are required")
-	default:
-		if err := s.Linear.React(r.Context(), body.CommentID, body.Emoji); err != nil {
-			writeErr(w, http.StatusBadGateway, err.Error())
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"reacted": true})
-	}
-}
-
-// Status is what Senapati's Linear status says: online or offline by
-// whether a main session is attached, and the issue it is working on.
+// Status is Senapati's Linear status. It says something only when
+// something is wrong: no main session, or a task waiting on the person.
+// Otherwise it is clear.
 type Status struct{ Emoji, Label string }
 
 var offline = Status{"💤", "Offline - pings wait until I'm back"}
 
 func (s *Server) currentStatus() Status {
-	s.mu.Lock()
-	s.init()
-	live := s.attachment().Live
-	s.mu.Unlock()
-	if !live {
+	if !s.live() {
 		return offline
 	}
 	if rec, err := s.Store.Recovery(); err == nil {
 		for _, t := range rec.Open {
-			if t.Status == "working" && t.Issue != "" {
-				return Status{"🟢", "Working on " + t.Issue}
+			if t.Status == Blocked || t.Status == WaitingApproval {
+				if t.Issue != "" {
+					return Status{"⚠️", "Blocked on " + t.Issue + " - needs you"}
+				}
+				return Status{"⚠️", "Blocked - needs you"}
 			}
 		}
 	}
-	return Status{"🟢", "Online"}
+	return Status{}
 }
 
-// WatchStatus keeps Senapati's Linear status in step with currentStatus,
-// checking every interval, until ctx ends; a failed update is retried at the
-// next check. On the way out it leaves the status offline.
-func (s *Server) WatchStatus(ctx context.Context, every time.Duration) {
+func (s *Server) live() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.init()
+	return s.attachment().Live
+}
+
+// Watch runs until ctx ends, checking every interval: it keeps Senapati's
+// Linear status at currentStatus, and tells the person about any ping still
+// unaccepted nudgeAfter after it arrived - once per ping, mentioning its
+// author - so a ping never sits silently while the session is offline,
+// busy or at its usage limit. What fails is retried at the next check. On
+// the way out it leaves the status offline.
+func (s *Server) Watch(ctx context.Context, every, nudgeAfter time.Duration) {
 	if s.Linear == nil {
 		return
 	}
-	var shown Status
+	shown := Status{"?", "?"} // whatever an earlier run left: set it once
 	set := func(ctx context.Context, st Status) {
 		if st == shown {
 			return
@@ -318,6 +304,9 @@ func (s *Server) WatchStatus(ctx context.Context, every time.Duration) {
 	defer t.Stop()
 	for {
 		set(ctx, s.currentStatus())
+		if nudgeAfter > 0 {
+			s.nudge(ctx, nudgeAfter)
+		}
 		select {
 		case <-ctx.Done():
 			off, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -326,6 +315,36 @@ func (s *Server) WatchStatus(ctx context.Context, every time.Duration) {
 			return
 		case <-t.C:
 		}
+	}
+}
+
+func (s *Server) nudge(ctx context.Context, after time.Duration) {
+	pending, err := s.Store.Pending(0)
+	if err != nil {
+		return
+	}
+	for _, e := range pending {
+		if e.NudgedAt != nil || e.IssueID == "" || s.now().Sub(e.ReceivedAt) < after {
+			continue
+		}
+		mention := ""
+		if e.AuthorID != "" {
+			if h, err := s.Linear.Handle(ctx, e.AuthorID); err == nil && h != "" {
+				mention = "@" + h + " "
+			}
+		}
+		why := "I'm offline right now. It's queued, and I'll pick it up as soon as I'm back."
+		if s.live() {
+			why = "I haven't started on it yet: I'm busy with something else or at my usage limit. It's queued, and I'll pick it up as soon as I can."
+		}
+		if err := s.Linear.Comment(ctx, e.IssueID, e.ThreadID, mention+"I've received this. "+why); err != nil {
+			s.Logger.Printf("linear: could not nudge about %s: %v", e.ID, err)
+			continue
+		}
+		if err := s.Store.MarkNudged(e.ID); err != nil {
+			s.Logger.Printf("bridge: nudged about %s but could not record it: %v", e.ID, err)
+		}
+		s.Logger.Printf("linear: nudged %s about %s waiting %s", e.Author, e.ID, s.now().Sub(e.ReceivedAt).Round(time.Minute))
 	}
 }
 
