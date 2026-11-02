@@ -13,10 +13,12 @@ session and serves it to the session over a local, authenticated API:
   and every new connection replays them, so a restart neither loses nor
   duplicates work. A task is done only with a result.
 - **Presence on Linear** (with `linear.apiKey`). Each stored ping gets a 👀
-  reaction at once, so you can see it arrived even while the main session is
-  busy or offline. Senapati's Linear status shows whether a main session is
-  attached, and which issue it is working on. The main session can react to a
-  comment (`samrajya_react`) rather than reply.
+  reaction at once, so you can see it arrived. Senapati's Linear status stays
+  clear while things are fine and says so when no main session is attached or
+  a task is blocked on you. A ping still unaccepted after `linear.nudgeAfter`
+  (default 15 minutes) gets one comment in its thread mentioning its author,
+  so a ping never sits silently while the session is offline, busy or at its
+  usage limit.
 - **Action journal.** Significant external actions, such as Linear replies, are
   recorded before they are attempted. One never resolved is reported as
   uncertain, to be checked before it is retried.
