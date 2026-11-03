@@ -5,6 +5,7 @@ import type { IncomingMessage, Server as HTTPServer, ServerResponse } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { spawn } from 'node:child_process';
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -74,6 +75,7 @@ class FakeBridge {
       this.holderLive = true;
       return send(200, { attachment: this.holder, generation: this.gen });
     }
+    if (url.pathname === '/v1/limit') return send(200, { until: '2026-11-02T19:10:00Z' });
     if (url.pathname === '/v1/status') return send(200, { attached: { live: this.holderLive }, recovery: { pending: this.pendingAfter(0) } });
     if (held()) return send(409, { error: 'not attached' });
     if (url.pathname === '/v1/events') {
@@ -312,4 +314,35 @@ test('the bundled plugin server starts over stdio and delivers a ping', { timeou
   });
   await client.connect(transport);
   assert.equal((await got).params.meta.event_id, 'linear:c1');
+});
+
+test('renders a notice from Samrajya as needing no task', () => {
+  const r = render({ id: 'samrajya:resume-1', seq: 3, source: 'samrajya', kind: 'limit_reset', trusted: true, body: 'Your usage limit has reset.' });
+  assert.match(r.content, /^Samrajya: Your usage limit has reset\./);
+  assert.match(r.content, /samrajya_accept \(event_id samrajya:resume-1\); it needs no task/);
+  assert.deepEqual(r.meta, { event_id: 'samrajya:resume-1', kind: 'limit_reset', trusted: 'true' });
+});
+
+test('the StopFailure hook reports only the main session hitting its usage limit', { timeout: 20000 }, async (t) => {
+  const bridge = new FakeBridge();
+  await bridge.listen();
+  const dir = await mkdtemp(join(tmpdir(), 'samrajya-hook-'));
+  const discoveryPath = join(dir, 'bridge.json');
+  await writeFile(discoveryPath, JSON.stringify({ url: bridge.url, token: bridge.token, mainDirectory: dir }));
+  t.after(async () => {
+    await bridge.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+  const hook = (input: object) => new Promise<number>((resolve) => {
+    const child = spawn(process.execPath, [fileURLToPath(new URL('../../plugin/server.mjs', import.meta.url)), '--stop-failure'],
+      { env: { ...process.env, SAMRAJYA_BRIDGE_FILE: discoveryPath, SAMRAJYA_MAIN: '' }, stdio: ['pipe', 'ignore', 'ignore'] });
+    child.on('exit', (code) => resolve(code ?? -1));
+    child.stdin.end(JSON.stringify(input));
+  });
+  const message = "You've hit your 5-hour limit · resets 7:10pm (UTC)";
+  assert.equal(await hook({ error: 'rate_limit', cwd: '/elsewhere', last_assistant_message: message }), 0);
+  assert.equal(await hook({ error: 'overloaded', cwd: dir, last_assistant_message: 'busy' }), 0);
+  assert.equal(bridge.requests.filter((r) => r.path === '/v1/limit').length, 0);
+  assert.equal(await hook({ error: 'rate_limit', cwd: dir, last_assistant_message: message, error_details: '429' }), 0);
+  assert.deepEqual(bridge.requests.find((r) => r.path === '/v1/limit')?.body, { message, details: '429' });
 });

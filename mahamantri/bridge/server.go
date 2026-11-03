@@ -171,6 +171,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				reply(w, t, err)
 			}
 		})
+	case r.Method == http.MethodPost && path == "/v1/limit":
+		s.limit(w, r)
 	case r.Method == http.MethodPost && path == "/v1/reply":
 		s.withHolder(w, r, s.reply)
 	case r.Method == http.MethodPost && path == "/v1/actions":
@@ -243,6 +245,10 @@ func (s *Server) withHolder(w http.ResponseWriter, r *http.Request, next http.Ha
 	}
 	a := s.attachment()
 	s.mu.Unlock()
+	if ok && r.Method == http.MethodPost && !s.limitedUntil().IsZero() {
+		// The session is calling tools, so its turns run again.
+		s.setLimited(time.Time{})
+	}
 	if !ok {
 		writeJSON(w, http.StatusConflict, map[string]any{"error": "this session is not attached as the main session", "attached": a})
 		return
@@ -309,6 +315,9 @@ func (s *Server) currentStatus() Status {
 	if !s.Live() {
 		return offline
 	}
+	if until := s.limitedUntil(); !until.IsZero() {
+		return Status{"⏳", "At my usage limit until " + untilText(until) + " - pings wait until then"}
+	}
 	if rec, err := s.Store.Recovery(); err == nil {
 		for _, t := range rec.Open {
 			if t.Status == Blocked || t.Status == WaitingApproval {
@@ -330,19 +339,18 @@ func (s *Server) Live() bool {
 	return s.attachment().Live
 }
 
-// Watch runs until ctx ends, checking every interval: it keeps Senapati's
-// Linear status at currentStatus, and tells the person about any ping still
-// unaccepted nudgeAfter after it arrived - once per ping, mentioning its
-// author - so a ping never sits silently while the session is offline,
-// busy or at its usage limit. What fails is retried at the next check. On
-// the way out it leaves the status offline.
+// Watch runs until ctx ends, checking every interval: it wakes the main
+// session once its usage limit has reset, and with a Linear key keeps
+// Senapati's Linear status at currentStatus and tells the person about a
+// ping still unaccepted nudgeAfter after it arrived - mentioning its author,
+// saying why it waits, once per thread and reason - so a ping never sits
+// silently while the session is offline, busy or at its usage limit. What
+// fails is retried at the next check. On the way out it leaves the status
+// offline.
 func (s *Server) Watch(ctx context.Context, every, nudgeAfter time.Duration) {
-	if s.Linear == nil {
-		return
-	}
 	shown := Status{"?", "?"} // whatever an earlier run left: set it once
 	set := func(ctx context.Context, st Status) {
-		if st == shown {
+		if st == shown || s.Linear == nil {
 			return
 		}
 		if err := s.Linear.SetStatus(ctx, st.Emoji, st.Label); err != nil {
@@ -354,8 +362,9 @@ func (s *Server) Watch(ctx context.Context, every, nudgeAfter time.Duration) {
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
+		s.wakeAfterLimit()
 		set(ctx, s.currentStatus())
-		if nudgeAfter > 0 {
+		if nudgeAfter > 0 && s.Linear != nil {
 			s.nudge(ctx, nudgeAfter)
 		}
 		select {
@@ -369,6 +378,10 @@ func (s *Server) Watch(ctx context.Context, every, nudgeAfter time.Duration) {
 	}
 }
 
+// nudgeQuiet is how long a thread that was told why its pings wait is not
+// told the same again.
+const nudgeQuiet = 6 * time.Hour
+
 func (s *Server) nudge(ctx context.Context, after time.Duration) {
 	pending, err := s.Store.Pending(0)
 	if err != nil {
@@ -378,24 +391,37 @@ func (s *Server) nudge(ctx context.Context, after time.Duration) {
 		if e.NudgedAt != nil || e.IssueID == "" || s.now().Sub(e.ReceivedAt) < after {
 			continue
 		}
+		reason, why := "offline", "I'm offline right now. It's queued, and I'll pick it up as soon as I'm back."
+		if until := s.limitedUntil(); !until.IsZero() {
+			reason = "limit " + until.Format(time.RFC3339)
+			why = "I'm at my usage limit until " + untilText(until) + ". It's queued, and I'll pick it up then."
+		} else if s.Live() {
+			reason, why = "busy", "I haven't started on it yet because I'm busy with other work. It's queued, and I'll pick it up as soon as I can."
+		}
+		// One comment per thread and reason: a second ping waiting for the
+		// same reason is covered by the first nudge.
+		key := "nudge:" + e.ThreadID
+		if last := strings.SplitN(s.Store.Meta(key), "|", 2); len(last) == 2 && last[1] == reason {
+			if at, err := time.Parse(time.RFC3339, last[0]); err == nil && s.now().Sub(at) < nudgeQuiet {
+				s.Store.MarkNudged(e.ID)
+				continue
+			}
+		}
 		mention := ""
 		if e.AuthorID != "" {
 			if h, err := s.Linear.Handle(ctx, e.AuthorID); err == nil && h != "" {
 				mention = "@" + h + " "
 			}
 		}
-		why := "I'm offline right now. It's queued, and I'll pick it up as soon as I'm back."
-		if s.Live() {
-			why = "I haven't started on it yet: I'm busy with something else or at my usage limit. It's queued, and I'll pick it up as soon as I can."
-		}
 		if _, err := s.Linear.Comment(ctx, e.IssueID, e.ThreadID, mention+"I've received this. "+why); err != nil {
 			s.Logger.Printf("linear: could not nudge about %s: %v", e.ID, err)
 			continue
 		}
+		s.Store.SetMeta(key, s.now().Format(time.RFC3339)+"|"+reason)
 		if err := s.Store.MarkNudged(e.ID); err != nil {
 			s.Logger.Printf("bridge: nudged about %s but could not record it: %v", e.ID, err)
 		}
-		s.Logger.Printf("linear: nudged %s about %s waiting %s", e.Author, e.ID, s.now().Sub(e.ReceivedAt).Round(time.Minute))
+		s.Logger.Printf("linear: nudged %s about %s waiting %s (%s)", e.Author, e.ID, s.now().Sub(e.ReceivedAt).Round(time.Minute), reason)
 	}
 }
 

@@ -313,6 +313,38 @@ func (s *Store) MarkNudged(id string) error {
 	})
 }
 
+// Notice stores a notice from Samrajya itself, such as "your usage limit
+// has reset", for the main session; it is delivered like a ping and
+// acknowledged without a task.
+func (s *Store) Notice(id, kind, body string) error {
+	_, err := s.ingest(Event{ID: "samrajya:" + id, Source: "samrajya", Kind: kind, Trusted: true, Body: body})
+	return err
+}
+
+// acknowledge marks notices seen. A ping must go into a task instead.
+func (s *Store) acknowledge(ids []string) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bEvents)
+		now := s.now()
+		for _, id := range ids {
+			var e Event
+			if err := getJSON(b, id, &e); err != nil {
+				return fmt.Errorf("event %s: %w", id, err)
+			}
+			if e.Source == "linear" {
+				return fmt.Errorf("event %s is a ping: accept it into a task (task id or new task)", id)
+			}
+			if e.AcceptedAt == nil {
+				e.AcceptedAt = &now
+				if err := putJSON(b, id, e); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+}
+
 // Accept attaches events to a task - an existing one (taskID) or one created
 // for them (create) - and records what happens next, in one transaction.
 // Events already accepted keep the task they were accepted into; accepting
@@ -322,8 +354,11 @@ func (s *Store) Accept(eventIDs []string, taskID string, create *NewTask, next s
 	if len(eventIDs) == 0 {
 		return Task{}, errors.New("no events to accept")
 	}
-	if (taskID == "") == (create == nil) {
-		return Task{}, errors.New("give either a task id or a new task, not both or neither")
+	if taskID == "" && create == nil {
+		return Task{}, s.acknowledge(eventIDs)
+	}
+	if taskID != "" && create != nil {
+		return Task{}, errors.New("give either a task id or a new task, not both")
 	}
 	if strings.TrimSpace(next) == "" {
 		return Task{}, errors.New("say what happens next (nextAction)")

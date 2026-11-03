@@ -38,6 +38,7 @@ Project-specific rules (worktrees, dependencies, services, branches) live in the
 export interface Event {
   id: string;
   seq: number;
+  source?: string;
   kind: string;
   issue?: string;
   issueTitle?: string;
@@ -50,6 +51,13 @@ export interface Event {
 }
 
 export function render(e: Event): { content: string; meta: Record<string, string> } {
+  if (e.source && e.source !== 'linear') {
+    // A notice from Samrajya itself, such as a usage limit having reset.
+    return {
+      content: `Samrajya: ${e.body.trim()}\nAcknowledge it with samrajya_accept (event_id ${e.id}); it needs no task.`,
+      meta: { event_id: e.id, kind: e.kind, trusted: 'true' },
+    };
+  }
   const what = e.kind === 'reply' ? 'replied in a thread you are part of' : 'mentioned you';
   const issue = e.issue ? `${e.issue}${e.issueTitle ? ` (${JSON.stringify(e.issueTitle)})` : ''}` : 'a Linear issue';
   const lines = [
@@ -76,7 +84,7 @@ const tools = [
   },
   {
     name: 'samrajya_accept',
-    description: 'Accept Linear pings into a task before working on them: an existing task (task_id) or a new one (new_task_title). Idempotent.',
+    description: 'Accept Linear pings into a task before working on them: an existing task (task_id) or a new one (new_task_title), with next_action. Idempotent. A notice from Samrajya is acknowledged with its event id alone.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -86,7 +94,7 @@ const tools = [
         project: str('Workspace project the new task is in, if known'),
         next_action: str('What happens next'),
       },
-      required: ['event_ids', 'next_action'],
+      required: ['event_ids'],
       additionalProperties: false,
     },
   },
@@ -217,7 +225,7 @@ export function createChannel(opts: ChannelOptions) {
   let running: Promise<void> | undefined;
   const abort = new AbortController();
 
-  const mcp = new Server({ name: 'samrajya', version: '0.1.5' }, {
+  const mcp = new Server({ name: 'samrajya', version: '0.1.6' }, {
     capabilities: { experimental: { 'claude/channel': {} }, tools: {} },
     instructions,
   });
