@@ -163,7 +163,7 @@ test('declares a channel with the task tools and no permission relay', async (t)
   assert.deepEqual(client.getServerCapabilities()?.experimental, { 'claude/channel': {} });
   const names = (await client.listTools()).tools.map((x) => x.name);
   assert.deepEqual(names, ['samrajya_status', 'samrajya_accept', 'samrajya_create_task', 'samrajya_update_task',
-    'samrajya_tasks', 'samrajya_action_intent', 'samrajya_action_result', 'samrajya_memory', 'samrajya_remember',
+    'samrajya_tasks', 'samrajya_reply', 'samrajya_action_intent', 'samrajya_action_result', 'samrajya_memory', 'samrajya_remember',
     'samrajya_forget', 'samrajya_take_over']);
   assert.match(client.getInstructions() ?? '', /You own outcomes/);
 });

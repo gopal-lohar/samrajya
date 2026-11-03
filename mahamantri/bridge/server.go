@@ -74,7 +74,7 @@ func (s *Server) init() {
 type Linear interface {
 	React(ctx context.Context, commentID, emoji string) error
 	SetStatus(ctx context.Context, emoji, label string) error
-	Comment(ctx context.Context, issueID, parentID, body string) error
+	Comment(ctx context.Context, issue, parentID, body string) (linear.Posted, error)
 	Handle(ctx context.Context, userID string) (string, error)
 }
 
@@ -171,6 +171,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				reply(w, t, err)
 			}
 		})
+	case r.Method == http.MethodPost && path == "/v1/reply":
+		s.withHolder(w, r, s.reply)
 	case r.Method == http.MethodPost && path == "/v1/actions":
 		s.withHolder(w, r, func(w http.ResponseWriter, r *http.Request) {
 			var a Action
@@ -246,6 +248,54 @@ func (s *Server) withHolder(w http.ResponseWriter, r *http.Request, next http.Ha
 		return
 	}
 	next(w, r)
+}
+
+// reply posts a comment as Senapati for the main session, journaled: the
+// action is recorded before posting and resolved with the comment after, so
+// the comment's thread is known at once and a crash in between leaves it
+// uncertain rather than forgotten. A comment posted this way, rather than
+// through the session's Linear connector, is Senapati's whoever the
+// connector belongs to.
+func (s *Server) reply(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		TaskID   string `json:"taskId"`
+		Issue    string `json:"issue"`
+		ThreadID string `json:"threadId"`
+		Body     string `json:"body"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	switch {
+	case s.Linear == nil:
+		writeErr(w, http.StatusNotImplemented, "mahamantri has no Linear API key (linear.apiKey), so it cannot post")
+		return
+	case body.Issue == "" || strings.TrimSpace(body.Body) == "":
+		writeErr(w, http.StatusBadRequest, "issue and body are required")
+		return
+	}
+	target := body.Issue
+	if body.ThreadID != "" {
+		target += " thread " + body.ThreadID
+	}
+	a, err := s.Store.Intend(Action{TaskID: body.TaskID, Kind: "linear_comment", Target: target, Intent: truncate(body.Body, 200)})
+	if err != nil {
+		reply(w, nil, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	posted, err := s.Linear.Comment(ctx, body.Issue, body.ThreadID, body.Body)
+	if err != nil {
+		// The comment may or may not exist (a timeout, say): leave the
+		// action unresolved, to be checked on Linear before retrying.
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error() + " - check the thread on Linear before posting again", "actionId": a.ID})
+		return
+	}
+	if _, err := s.Store.Resolve(a.ID, Happened, posted.ID, "", posted.ThreadID, posted.Issue); err != nil {
+		s.Logger.Printf("bridge: posted comment %s but could not record it: %v", posted.ID, err)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"commentId": posted.ID, "threadId": posted.ThreadID, "issue": posted.Issue, "url": posted.URL, "actionId": a.ID})
 }
 
 // Status is Senapati's Linear status. It says something only when
@@ -338,7 +388,7 @@ func (s *Server) nudge(ctx context.Context, after time.Duration) {
 		if s.Live() {
 			why = "I haven't started on it yet: I'm busy with something else or at my usage limit. It's queued, and I'll pick it up as soon as I can."
 		}
-		if err := s.Linear.Comment(ctx, e.IssueID, e.ThreadID, mention+"I've received this. "+why); err != nil {
+		if _, err := s.Linear.Comment(ctx, e.IssueID, e.ThreadID, mention+"I've received this. "+why); err != nil {
 			s.Logger.Printf("linear: could not nudge about %s: %v", e.ID, err)
 			continue
 		}

@@ -170,6 +170,10 @@ func renderPing(e bridge.Event) string {
 	if thread == "" {
 		thread = "(new)"
 	}
-	fmt.Fprintf(&b, "Accept it with samrajya_accept (event_id %s) before working on it; reply in thread %s.", e.ID, thread)
+	on := e.Issue
+	if on == "" {
+		on = "the issue"
+	}
+	fmt.Fprintf(&b, "Accept it with samrajya_accept (event_id %s) before working on it; answer with samrajya_reply on %s, thread %s.", e.ID, on, thread)
 	return b.String()
 }

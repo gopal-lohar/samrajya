@@ -67,19 +67,28 @@ func TestAPICommentsInAThreadAndLooksUpHandles(t *testing.T) {
 		var req map[string]any
 		json.NewDecoder(r.Body).Decode(&req)
 		got = append(got, req)
-		if strings.Contains(req["query"].(string), "commentCreate") {
-			w.Write([]byte(`{"data":{"commentCreate":{"success":true}}}`))
-		} else {
+		switch q := req["query"].(string); {
+		case strings.Contains(q, "commentCreate"):
+			w.Write([]byte(`{"data":{"commentCreate":{"success":true,"comment":{"id":"c9","url":"u","parent":{"id":"th"},"issue":{"id":"0b0e6f0c-1a1a-4b4b-8c8c-000000000001","identifier":"ENG-1"}}}}}`))
+		case strings.Contains(q, "issue(id"):
+			w.Write([]byte(`{"data":{"issue":{"id":"0b0e6f0c-1a1a-4b4b-8c8c-000000000001"}}}`))
+		default:
 			w.Write([]byte(`{"data":{"user":{"displayName":"asha"}}}`))
 		}
 	}))
 	defer ts.Close()
 	a := &API{Key: "k", URL: ts.URL}
-	if err := a.Comment(context.Background(), "iss", "th", "hi"); err != nil {
+	p, err := a.Comment(context.Background(), "ENG-1", "th", "hi")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if in := got[0]["variables"].(map[string]any)["input"].(map[string]any); in["issueId"] != "iss" || in["parentId"] != "th" || in["body"] != "hi" {
+	// An issue key is looked up first: the mutation takes its id.
+	in := got[1]["variables"].(map[string]any)["input"].(map[string]any)
+	if in["issueId"] != "0b0e6f0c-1a1a-4b4b-8c8c-000000000001" || in["parentId"] != "th" || in["body"] != "hi" {
 		t.Errorf("comment input = %v", in)
+	}
+	if p.ID != "c9" || p.ThreadID != "th" || p.Issue != "ENG-1" {
+		t.Errorf("posted = %+v", p)
 	}
 	if h, err := a.Handle(context.Background(), "u1"); err != nil || h != "asha" {
 		t.Errorf("handle = %q, %v", h, err)

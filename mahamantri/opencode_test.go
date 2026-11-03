@@ -175,7 +175,7 @@ func TestOpencodeDeliversEachPingOnceAndRecreatesALostSession(t *testing.T) {
 
 func TestRenderPingMarksUntrustedAuthors(t *testing.T) {
 	got := renderPing(bridge.Event{ID: "linear:c1", Kind: "reply", Issue: "ENG-1", IssueTitle: "Fix", Author: "Bo", Body: "a\nb", ThreadID: "t1"})
-	for _, want := range []string{`Bo replied in a thread you are part of on ENG-1 ("Fix"). They are NOT a trusted requester.`, "> a\n> b", "reply in thread t1"} {
+	for _, want := range []string{`Bo replied in a thread you are part of on ENG-1 ("Fix"). They are NOT a trusted requester.`, "> a\n> b", "answer with samrajya_reply on ENG-1, thread t1"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)
 		}

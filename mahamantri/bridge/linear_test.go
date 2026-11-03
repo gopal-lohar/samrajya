@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -40,14 +41,18 @@ func (f *fakeLinear) SetStatus(_ context.Context, emoji, label string) error {
 	return nil
 }
 
-func (f *fakeLinear) Comment(_ context.Context, issue, parent, body string) error {
+func (f *fakeLinear) Comment(_ context.Context, issue, parent, body string) (linear.Posted, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.fail {
-		return errors.New("down")
+		return linear.Posted{}, errors.New("down")
 	}
 	f.comments = append(f.comments, issue+" "+parent+" "+body)
-	return nil
+	p := linear.Posted{ID: "cmt-" + body[:1], ThreadID: parent, Issue: issue}
+	if parent == "" {
+		p.ThreadID = p.ID
+	}
+	return p, nil
 }
 
 func (f *fakeLinear) Handle(_ context.Context, userID string) (string, error) {
@@ -169,5 +174,38 @@ func TestAPingLeftWaitingIsNudgedOnceMentioningItsAuthor(t *testing.T) {
 	s.nudge(context.Background(), 15*time.Minute)
 	if _, _, cm := fake.got(); len(cm) != 2 || !strings.Contains(cm[1], "busy") {
 		t.Errorf("nudges = %v", cm)
+	}
+}
+
+func TestReplyPostsAsSenapatiAndJournalsIt(t *testing.T) {
+	s, fake, c := linearServer(t)
+	if code, _ := c.do("POST", "/v1/reply", map[string]string{"issue": "ENG-1", "body": "hi"}); code != http.StatusConflict {
+		t.Errorf("unattached reply: %d", code)
+	}
+	c.attach(false)
+	if code, _ := c.do("POST", "/v1/reply", map[string]string{"issue": "ENG-1"}); code != http.StatusBadRequest {
+		t.Errorf("no body: %d", code)
+	}
+	code, out := c.do("POST", "/v1/reply", map[string]string{"issue": "ENG-1", "threadId": "th-1", "body": "Done"})
+	if code != http.StatusOK || out["commentId"] != "cmt-D" || out["threadId"] != "th-1" {
+		t.Fatalf("reply: %d %v", code, out)
+	}
+	_, _, cm := fake.got()
+	if len(cm) != 1 || cm[0] != "ENG-1 th-1 Done" {
+		t.Errorf("comments = %v", cm)
+	}
+	// A new top-level comment starts a thread Senapati is part of.
+	c.do("POST", "/v1/reply", map[string]string{"issue": "ENG-1", "body": "New"})
+	if !s.Store.Has("cmt-N") {
+		t.Error("the new comment's thread was not learned")
+	}
+	// A failed post stays an unresolved action, to be checked before retrying.
+	fake.setFail(true)
+	if code, out := c.do("POST", "/v1/reply", map[string]string{"issue": "ENG-1", "body": "Lost"}); code != http.StatusBadGateway || out["actionId"] == nil {
+		t.Errorf("failed reply: %d %v", code, out)
+	}
+	rec, _ := s.Store.Recovery()
+	if len(rec.Uncertain) != 1 {
+		t.Errorf("uncertain actions = %v", rec.Uncertain)
 	}
 }

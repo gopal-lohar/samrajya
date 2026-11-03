@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -127,23 +128,59 @@ func (a *API) viewer(ctx context.Context) (string, error) {
 	return a.me, nil
 }
 
-// Comment posts body on an issue as Senapati, in the thread parentID if set.
-func (a *API) Comment(ctx context.Context, issueID, parentID, body string) error {
-	input := map[string]string{"issueId": issueID, "body": body}
+// Comment posts body on an issue (its id or key, e.g. ENG-1) as Senapati,
+// in the thread parentID if set, and returns the new comment.
+func (a *API) Comment(ctx context.Context, issue, parentID, body string) (Posted, error) {
+	if !isUUID(issue) {
+		var found struct {
+			Issue struct {
+				ID string `json:"id"`
+			} `json:"issue"`
+		}
+		if err := a.do(ctx, `query($id: String!) { issue(id: $id) { id } }`, map[string]any{"id": issue}, &found); err != nil {
+			return Posted{}, fmt.Errorf("issue %s: %w", issue, err)
+		}
+		issue = found.Issue.ID
+	}
+	input := map[string]string{"issueId": issue, "body": body}
 	if parentID != "" {
 		input["parentId"] = parentID
 	}
 	var out struct {
 		CommentCreate struct {
 			Success bool `json:"success"`
+			Comment struct {
+				ID     string `json:"id"`
+				URL    string `json:"url"`
+				Parent *struct {
+					ID string `json:"id"`
+				} `json:"parent"`
+				Issue struct {
+					ID         string `json:"id"`
+					Identifier string `json:"identifier"`
+				} `json:"issue"`
+			} `json:"comment"`
 		} `json:"commentCreate"`
 	}
-	err := a.do(ctx, `mutation($input: CommentCreateInput!) { commentCreate(input: $input) { success } }`,
+	err := a.do(ctx, `mutation($input: CommentCreateInput!) { commentCreate(input: $input) { success comment { id url parent { id } issue { id identifier } } } }`,
 		map[string]any{"input": input}, &out)
 	if err == nil && !out.CommentCreate.Success {
 		err = errors.New("linear api: comment not created")
 	}
-	return err
+	if err != nil {
+		return Posted{}, err
+	}
+	c := out.CommentCreate.Comment
+	p := Posted{ID: c.ID, URL: c.URL, ThreadID: c.ID, IssueID: c.Issue.ID, Issue: c.Issue.Identifier}
+	if c.Parent != nil {
+		p.ThreadID = c.Parent.ID
+	}
+	return p, nil
+}
+
+// Posted is a comment Comment created.
+type Posted struct {
+	ID, URL, ThreadID, IssueID, Issue string
 }
 
 // Handle is what a comment @-mentions a user as.
@@ -157,4 +194,20 @@ func (a *API) Handle(ctx context.Context, userID string) (string, error) {
 		return "", err
 	}
 	return out.User.DisplayName, nil
+}
+
+func isUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, r := range s {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if r != '-' {
+				return false
+			}
+		} else if !strings.ContainsRune("0123456789abcdefABCDEF", r) {
+			return false
+		}
+	}
+	return true
 }
