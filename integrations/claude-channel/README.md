@@ -76,8 +76,8 @@ Start Mahamantri first, then the session, with
 directory, so project instructions apply:
 
 ```sh
-integrations/claude-channel/restart-main.sh           # stop it and resume its conversation
-integrations/claude-channel/restart-main.sh --fresh   # stop it and start a new conversation
+integrations/claude-channel/restart-main.sh           # stop it and start a new one
+integrations/claude-channel/restart-main.sh --resume  # stop it and resume its last conversation
 integrations/claude-channel/restart-main.sh --ensure  # start it only if none is running
 ```
 
@@ -85,8 +85,11 @@ Use it after changing the session's settings or your login too. It stops
 every session with that name in the main directory by id first: only one
 session holds the main attachment, so a leftover session keeps receiving pings
 while a new one stays passive, and `claude stop <name>` doesn't reliably find
-a session when several share the name. It remembers the last main session, so
-a restart resumes its conversation.
+a session when several share the name. A new session starts a new
+conversation; open tasks with their checkpoints, the brain and the Linear
+threads carry the work over. Resuming is opt-in: Claude Code asks before it
+resumes a long or long-idle conversation, which nobody can answer in a
+background session, and reloading one costs usage.
 
 Claude Code ends a background session after 8 hours idle. Set Mahamantri's
 `bridge.keepMain` to the script with `--ensure`, and Mahamantri starts the

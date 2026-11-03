@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
 # Start, restart or keep running the main Claude Code session for mode claude.
 #
-#   restart-main.sh           stop the main session and resume its conversation
-#   restart-main.sh --fresh   stop it and start a new conversation
+#   restart-main.sh           stop the main session and start a new one
+#   restart-main.sh --resume  stop it and resume its last conversation
 #   restart-main.sh --ensure  start it only if none is running (mahamantri runs
 #                             this when no main session is attached)
 #
 # Only one session can hold the bridge's main attachment, and a leftover one
 # keeps it while a new one stays passive, so every session with the main
-# session's name in the main directory is stopped first, by id. The last main
-# session's id is kept in the state directory: Claude Code ends a background
-# session after hours idle, and resuming it keeps the conversation instead of
-# starting from nothing. The main directory comes from mahamantri's discovery
-# file, so start mahamantri first.
+# session's name in the main directory is stopped first, by id. A new session
+# starts a new conversation: what carries over is in Samrajya (open tasks and
+# their checkpoints, the brain) and on Linear. Resuming the last one is opt-in
+# because Claude Code asks before resuming a long or long-idle conversation -
+# a question nobody answers in a background session - and reloading it costs
+# usage. The main directory comes from mahamantri's discovery file, so start
+# mahamantri first.
 #
 # Like managed mode's sainiks, the session runs without permission prompts: it
 # works unattended, and a prompt would leave a ping blocked until someone
@@ -22,8 +24,8 @@
 set -euo pipefail
 
 mode=${1:-restart}
-case $mode in restart | --fresh | --ensure) ;; *)
-  echo "usage: $0 [--fresh | --ensure]" >&2
+case $mode in restart | --resume | --ensure) ;; *)
+  echo "usage: $0 [--resume | --ensure]" >&2
   exit 2
   ;;
 esac
@@ -71,7 +73,7 @@ start() {
 }
 # Resuming with options makes a copy of the conversation that runs with
 # them; the old session is stopped above.
-if [[ $mode != --fresh && -s $last ]]; then
+if [[ $mode == --resume && -s $last ]]; then
   start --resume "$(cat "$last")" && exit 0
   echo "could not resume $(cat "$last"); starting a new conversation" >&2
 fi
