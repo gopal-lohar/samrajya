@@ -115,6 +115,9 @@ func run(configPath string) error {
 	if oc != nil {
 		go oc.deliver(ctx, srv)
 	}
+	if cfg.Mode == "claude" && len(cfg.Bridge.KeepMain) > 0 {
+		go newKeepMain(cfg.Bridge.KeepMain, srv.Live, logger).loop(ctx, 30*time.Second)
+	}
 	statusDone := make(chan struct{})
 	go func() { srv.Watch(ctx, 20*time.Second, cfg.Linear.NudgeAfter); close(statusDone) }()
 

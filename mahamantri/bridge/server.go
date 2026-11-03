@@ -256,7 +256,7 @@ type Status struct{ Emoji, Label string }
 var offline = Status{"💤", "Offline - pings wait until I'm back"}
 
 func (s *Server) currentStatus() Status {
-	if !s.live() {
+	if !s.Live() {
 		return offline
 	}
 	if rec, err := s.Store.Recovery(); err == nil {
@@ -272,7 +272,8 @@ func (s *Server) currentStatus() Status {
 	return Status{}
 }
 
-func (s *Server) live() bool {
+// Live reports whether a main session is attached and has been heard from.
+func (s *Server) Live() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.init()
@@ -334,7 +335,7 @@ func (s *Server) nudge(ctx context.Context, after time.Duration) {
 			}
 		}
 		why := "I'm offline right now. It's queued, and I'll pick it up as soon as I'm back."
-		if s.live() {
+		if s.Live() {
 			why = "I haven't started on it yet: I'm busy with something else or at my usage limit. It's queued, and I'll pick it up as soon as I can."
 		}
 		if err := s.Linear.Comment(ctx, e.IssueID, e.ThreadID, mention+"I've received this. "+why); err != nil {

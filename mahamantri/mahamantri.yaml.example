@@ -30,6 +30,9 @@ bridge:
   # discoveryFile: ""        # default $XDG_STATE_HOME/samrajya/bridge.json
   # mainDirectory: ""        # where the main session runs; default: the workspace
   trustedUserIDs: []         # Linear users who may ask for work; empty = everyone
+  # Starts the main session when none is attached for 2 minutes (mode claude).
+  # Claude Code ends a background session after hours idle.
+  keepMain: ["../integrations/claude-channel/restart-main.sh", "--ensure"]
 
 # mode: opencode only.
 opencode:

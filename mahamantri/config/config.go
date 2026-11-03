@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -71,6 +72,13 @@ type Config struct {
 		// to check with a trusted person, not instructions. Empty: everyone
 		// is trusted.
 		TrustedUserIDs []string `yaml:"trustedUserIDs"`
+		// KeepMain is a command mahamantri runs whenever no main session has
+		// been attached for a while, to start one: Claude Code ends a
+		// background session after hours idle, and nothing else would bring
+		// it back. Mode claude only; empty: nobody restarts it. A relative
+		// program path is taken from the config's directory, e.g.
+		// ["../integrations/claude-channel/restart-main.sh", "--ensure"].
+		KeepMain []string `yaml:"keepMain"`
 	} `yaml:"bridge"`
 	// Opencode configures mode: opencode.
 	Opencode struct {
@@ -153,7 +161,11 @@ func Load(path string) (Config, error) {
 	if c.Opencode.InstructionsFile == "" {
 		c.Opencode.InstructionsFile = "../senapati/senapati.md"
 	}
-	for _, p := range []*string{&c.Workspace, &c.Brain, &c.Bridge.Store, &c.Bridge.DiscoveryFile, &c.Bridge.MainDirectory, &c.Opencode.InstructionsFile} {
+	paths := []*string{&c.Workspace, &c.Brain, &c.Bridge.Store, &c.Bridge.DiscoveryFile, &c.Bridge.MainDirectory, &c.Opencode.InstructionsFile}
+	if len(c.Bridge.KeepMain) > 0 && strings.ContainsRune(c.Bridge.KeepMain[0], '/') {
+		paths = append(paths, &c.Bridge.KeepMain[0])
+	}
+	for _, p := range paths {
 		if *p != "" && !filepath.IsAbs(*p) {
 			*p = filepath.Join(c.Dir, *p)
 		}
