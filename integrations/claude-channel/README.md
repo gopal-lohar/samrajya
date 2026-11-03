@@ -71,25 +71,42 @@ replaces Anthropic's default allowlist of official channel plugins.
 
 ### Start the main session
 
-Start Mahamantri first, then the session. Run it from your
-workspace directory so project instructions apply:
+Start Mahamantri first, then the session, with
+`integrations/claude-channel/restart-main.sh`. It runs the session in the main
+directory, so project instructions apply:
 
 ```sh
-claude --bg -n samrajya --channels plugin:samrajya@samrajya --remote-control Samrajya
+integrations/claude-channel/restart-main.sh           # stop it and resume its conversation
+integrations/claude-channel/restart-main.sh --fresh   # stop it and start a new conversation
+integrations/claude-channel/restart-main.sh --ensure  # start it only if none is running
 ```
 
-To restart it, for example after changing its settings or your login, use
-`integrations/claude-channel/restart-main.sh`. It stops every session with
-that name in the main directory by id, then starts a new one there. Only one
+Use it after changing the session's settings or your login too. It stops
+every session with that name in the main directory by id first: only one
 session holds the main attachment, so a leftover session keeps receiving pings
-while the new one stays passive. `claude stop <name>` doesn't reliably find a
-session when several share the name.
+while a new one stays passive, and `claude stop <name>` doesn't reliably find
+a session when several share the name. It remembers the last main session, so
+a restart resumes its conversation.
+
+Claude Code ends a background session after 8 hours idle. Set Mahamantri's
+`bridge.keepMain` to the script with `--ensure`, and Mahamantri starts the
+session again whenever none has been attached for two minutes.
 
 The main session does real work unattended, so the script starts it with
-`--dangerously-skip-permissions`. Otherwise a prompt, for example to post a
-Linear reply, leaves the task blocked until someone answers it. Claude Code
-asks you to accept that mode's disclaimer once, interactively:
-`claude --dangerously-skip-permissions`, then `/exit`.
+`--dangerously-skip-permissions`. Otherwise a prompt leaves a task blocked
+until someone answers it. Claude Code asks you to accept that mode's
+disclaimer once, interactively: `claude --dangerously-skip-permissions`, then
+`/exit`.
+
+The session comments on Linear with `samrajya_reply`, which Mahamantri posts
+as Senapati with its own API key (`linear.apiKey`). The script disallows the
+Linear connector's comment tools, so the connector can be signed in as you:
+comments from your other Claude sessions are then yours, and only Senapati's
+are Senapati's.
+
+When a turn ends on the usage limit, the plugin's `StopFailure` hook tells
+Mahamantri, which shows it on Linear and wakes the session once the limit
+resets.
 
 Remote Control requires Claude Code to talk to `api.anthropic.com` directly.
 Don't set `ANTHROPIC_BASE_URL` to a proxy for this session. Mid-turn, events

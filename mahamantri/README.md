@@ -14,11 +14,18 @@ session and serves it to the session over a local, authenticated API:
   duplicates work. A task is done only with a result.
 - **Presence on Linear** (with `linear.apiKey`). Each stored ping gets a 👀
   reaction at once, so you can see it arrived. Senapati's Linear status stays
-  clear while things are fine and says so when no main session is attached or
-  a task is blocked on you. A ping still unaccepted after `linear.nudgeAfter`
-  (default 15 minutes) gets one comment in its thread mentioning its author,
-  so a ping never sits silently while the session is offline, busy or at its
-  usage limit.
+  clear while things are fine and says so when no main session is attached,
+  it is at its usage limit (until when), or a task is blocked on you. A ping
+  still unaccepted after `linear.nudgeAfter` (default 15 minutes) gets a
+  comment in its thread mentioning its author and saying why it waits, once
+  per thread and reason. The main session's comments go through Mahamantri
+  too (`samrajya_reply`), so they are Senapati's whoever the session's Linear
+  connector belongs to.
+- **Keeping the main session up.** With `bridge.keepMain`, Mahamantri starts
+  the main session whenever none has been attached for two minutes (Claude
+  Code ends a background session after 8 hours idle). When the session hits
+  its usage limit, the plugin tells Mahamantri, which wakes it with a notice
+  once the limit resets.
 - **Action journal.** Significant external actions, such as Linear replies, are
   recorded before they are attempted. One never resolved is reported as
   uncertain, to be checked before it is retried.
