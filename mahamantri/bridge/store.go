@@ -21,7 +21,7 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
-const schemaVersion = "1"
+const schemaVersion = "2"
 
 // maxBody bounds a stored comment; a longer one is cut, with its link kept.
 const maxBody = 16 << 10
@@ -32,6 +32,10 @@ var (
 	bTasks   = []byte("tasks")
 	bThreads = []byte("threads")
 	bActions = []byte("actions")
+	bAgents  = []byte("agents")
+	// bConvs maps a conversation key (e.g. linear:<issue uuid>) to the task
+	// it belongs to.
+	bConvs = []byte("conversations")
 )
 
 // Task states. A task is open until done or cancelled.
@@ -59,6 +63,17 @@ const (
 // ErrNotFound is returned for an unknown event, task or action id.
 var ErrNotFound = errors.New("not found")
 
+// ErrForbidden is returned when an agent touches what another agent owns.
+var ErrForbidden = errors.New("not yours")
+
+// mayTouch allows the main everything and a worker what it owns.
+func mayTouch(caller, owner string) error {
+	if caller == MainAgent || caller == owner {
+		return nil
+	}
+	return fmt.Errorf("%w: it belongs to agent %s", ErrForbidden, owner)
+}
+
 // Event is a ping in the inbox.
 type Event struct {
 	ID         string    `json:"id"`
@@ -82,6 +97,20 @@ type Event struct {
 	TaskID     string     `json:"taskId,omitempty"`
 	// NudgedAt is when the person was told the ping is still waiting.
 	NudgedAt *time.Time `json:"nudgedAt,omitempty"`
+	// Conversation is where the event belongs and a reply goes, e.g.
+	// linear:<issue uuid>.
+	Conversation string `json:"conversation,omitempty"`
+	// Agent owns the event: it alone is sent it and may accept it. Empty
+	// (events stored before agents existed) means the main.
+	Agent string `json:"agent,omitempty"`
+}
+
+// Owner is the agent that owns the event.
+func (e Event) Owner() string {
+	if e.Agent == "" {
+		return MainAgent
+	}
+	return e.Agent
 }
 
 // Task is a piece of work the main session owns: what was asked, where it
@@ -99,6 +128,20 @@ type Task struct {
 	Events     []string  `json:"events,omitempty"`
 	CreatedAt  time.Time `json:"createdAt"`
 	UpdatedAt  time.Time `json:"updatedAt"`
+	// Agent owns the task; empty means the main.
+	Agent string `json:"agent,omitempty"`
+	// Conversations linked to the task: its events route to its agent, and
+	// its agent may reply in them.
+	Conversations []string `json:"conversations,omitempty"`
+	Worktree      string   `json:"worktree,omitempty"`
+}
+
+// Owner is the agent that owns the task.
+func (t Task) Owner() string {
+	if t.Agent == "" {
+		return MainAgent
+	}
+	return t.Agent
 }
 
 func (t Task) Open() bool { return t.Status != Done && t.Status != Cancelled }
@@ -117,6 +160,7 @@ type TaskUpdate struct {
 	NextAction string `json:"nextAction,omitempty"`
 	Checkpoint string `json:"checkpoint,omitempty"`
 	Result     string `json:"result,omitempty"`
+	Worktree   string `json:"worktree,omitempty"`
 }
 
 // Action is a significant external effect - a Linear reply, a status change
@@ -149,7 +193,13 @@ type Store struct {
 	db      *bolt.DB
 	trusted map[string]bool
 	now     func() time.Time
+	// workers routes a trusted ping on an issue with no task to a new task
+	// and worker (see route). Off, everything goes to the main.
+	workers bool
 }
+
+// RouteToWorkers turns routing of issues to workers on or off.
+func (s *Store) RouteToWorkers(on bool) { s.workers = on }
 
 // Open opens (creating if needed) the store at path. Events from authors in
 // trusted (Linear user ids) are marked Trusted; with none listed, every
@@ -163,7 +213,7 @@ func Open(path string, trusted []string) (*Store, error) {
 		return nil, err
 	}
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bMeta, bEvents, bTasks, bThreads, bActions} {
+		for _, b := range [][]byte{bMeta, bEvents, bTasks, bThreads, bActions, bAgents, bConvs} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err
 			}
@@ -174,6 +224,13 @@ func Open(path string, trusted []string) (*Store, error) {
 			return meta.Put([]byte("schema"), []byte(schemaVersion))
 		case schemaVersion:
 			return nil
+		case "1":
+			// Schema 2 only adds buckets and fields; keep a copy of the
+			// schema 1 store first.
+			if err := tx.CopyFile(path+".schema1.bak", 0o600); err != nil {
+				return fmt.Errorf("backing up the schema 1 store: %w", err)
+			}
+			return meta.Put([]byte("schema"), []byte(schemaVersion))
 		default:
 			return fmt.Errorf("store schema %q is not supported by this mahamantri (want %s)", v, schemaVersion)
 		}
@@ -232,9 +289,77 @@ func (s *Store) ingest(e Event) (bool, error) {
 			return err
 		}
 		e.Seq, e.ReceivedAt, created = seq, s.now(), true
+		if e.Agent == "" {
+			if e.Agent, err = s.route(tx, &e); err != nil {
+				return err
+			}
+		}
 		return putJSON(b, e.ID, e)
 	})
 	return created, err
+}
+
+// route picks the agent that owns a new event, in the transaction that
+// stores it, so an event is never stored without an owner and two pings
+// for a new issue cannot make two tasks:
+//  1. a conversation linked to a task goes to that task's agent; a finished
+//     task is reopened rather than duplicated;
+//  2. with workers on, a trusted ping on an issue with no task makes a task
+//     and a worker for it;
+//  3. anything else goes to the main.
+func (s *Store) route(tx *bolt.Tx, e *Event) (string, error) {
+	if e.Source == "linear" && e.IssueID != "" {
+		e.Conversation = "linear:" + e.IssueID
+	}
+	if e.Conversation == "" {
+		return MainAgent, nil
+	}
+	tasks := tx.Bucket(bTasks)
+	if id := tx.Bucket(bConvs).Get([]byte(e.Conversation)); id != nil {
+		var t Task
+		if err := getJSON(tasks, string(id), &t); err != nil {
+			return "", fmt.Errorf("conversation %s: task %s: %w", e.Conversation, id, err)
+		}
+		if !t.Open() {
+			t.Status, t.UpdatedAt = Queued, s.now()
+			if err := putJSON(tasks, t.ID, t); err != nil {
+				return "", err
+			}
+		}
+		return t.Owner(), nil
+	}
+	if !s.workers || !e.Trusted {
+		return MainAgent, nil
+	}
+	title := e.Issue
+	if e.IssueTitle != "" {
+		title += ": " + e.IssueTitle
+	}
+	t, err := newTask(tasks, NewTask{Title: title, Issue: e.Issue, ThreadID: e.ThreadID}, s.now())
+	if err != nil {
+		return "", err
+	}
+	if err := s.assignWorker(tx, &t, e.Conversation); err != nil {
+		return "", err
+	}
+	return t.Agent, nil
+}
+
+// assignWorker gives task t a worker agent of its own and links conv (if
+// any) to it.
+func (s *Store) assignWorker(tx *bolt.Tx, t *Task, conv string) error {
+	a := Agent{ID: "w-" + t.ID, Role: RoleWorker, TaskID: t.ID, State: AgentIdle, CreatedAt: s.now()}
+	if err := putJSON(tx.Bucket(bAgents), a.ID, a); err != nil {
+		return err
+	}
+	t.Agent = a.ID
+	if conv != "" {
+		if err := tx.Bucket(bConvs).Put([]byte(conv), []byte(t.ID)); err != nil {
+			return err
+		}
+		t.Conversations = append(t.Conversations, conv)
+	}
+	return putJSON(tx.Bucket(bTasks), t.ID, *t)
 }
 
 // Has reports whether Senapati has written in threadID (linear.ThreadIndex).
@@ -273,8 +398,12 @@ func (s *Store) SetMeta(key, value string) error {
 }
 
 // Pending lists the events not yet accepted with Seq above after, oldest
-// first.
-func (s *Store) Pending(after uint64) ([]Event, error) {
+// first, for every agent.
+func (s *Store) Pending(after uint64) ([]Event, error) { return s.PendingFor("", after) }
+
+// PendingFor lists the events agent owns that are not yet accepted with Seq
+// above after, oldest first; agent "" lists everyone's.
+func (s *Store) PendingFor(agent string, after uint64) ([]Event, error) {
 	var out []Event
 	err := s.db.View(func(tx *bolt.Tx) error {
 		return tx.Bucket(bEvents).ForEach(func(_, v []byte) error {
@@ -282,7 +411,7 @@ func (s *Store) Pending(after uint64) ([]Event, error) {
 			if err := json.Unmarshal(v, &e); err != nil {
 				return err
 			}
-			if e.AcceptedAt == nil && e.Seq > after {
+			if e.AcceptedAt == nil && e.Seq > after && (agent == "" || e.Owner() == agent) {
 				out = append(out, e)
 			}
 			return nil
@@ -316,19 +445,25 @@ func (s *Store) MarkNudged(id string) error {
 // Notice stores a notice from Samrajya itself, such as "your usage limit
 // has reset", for the main session; it is delivered like a ping and
 // acknowledged without a task.
-func (s *Store) Notice(id, kind, body string) error {
-	_, err := s.ingest(Event{ID: "samrajya:" + id, Source: "samrajya", Kind: kind, Trusted: true, Body: body})
+func (s *Store) Notice(id, kind, body string) error { return s.NoticeFor(MainAgent, id, kind, body) }
+
+// NoticeFor stores a notice for one agent.
+func (s *Store) NoticeFor(agent, id, kind, body string) error {
+	_, err := s.ingest(Event{ID: "samrajya:" + id, Source: "samrajya", Kind: kind, Trusted: true, Body: body, Agent: agent})
 	return err
 }
 
 // acknowledge marks notices seen. A ping must go into a task instead.
-func (s *Store) acknowledge(ids []string) error {
+func (s *Store) acknowledge(caller string, ids []string) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bEvents)
 		now := s.now()
 		for _, id := range ids {
 			var e Event
 			if err := getJSON(b, id, &e); err != nil {
+				return fmt.Errorf("event %s: %w", id, err)
+			}
+			if err := mayTouch(caller, e.Owner()); err != nil {
 				return fmt.Errorf("event %s: %w", id, err)
 			}
 			if e.Source == "linear" {
@@ -351,11 +486,20 @@ func (s *Store) acknowledge(ids []string) error {
 // them again is not an error, so a redelivered ping cannot make a second
 // task.
 func (s *Store) Accept(eventIDs []string, taskID string, create *NewTask, next string) (Task, error) {
+	return s.AcceptAs(MainAgent, eventIDs, taskID, create, next)
+}
+
+// AcceptAs is Accept by an agent, which may accept only events it owns,
+// into a task it owns; only the main creates tasks this way.
+func (s *Store) AcceptAs(caller string, eventIDs []string, taskID string, create *NewTask, next string) (Task, error) {
 	if len(eventIDs) == 0 {
 		return Task{}, errors.New("no events to accept")
 	}
 	if taskID == "" && create == nil {
-		return Task{}, s.acknowledge(eventIDs)
+		return Task{}, s.acknowledge(caller, eventIDs)
+	}
+	if create != nil && caller != MainAgent {
+		return Task{}, fmt.Errorf("%w: a worker accepts into its own task (task_id), it does not start new ones", ErrForbidden)
 	}
 	if taskID != "" && create != nil {
 		return Task{}, errors.New("give either a task id or a new task, not both")
@@ -370,6 +514,9 @@ func (s *Store) Accept(eventIDs []string, taskID string, create *NewTask, next s
 		for _, id := range eventIDs {
 			var e Event
 			if err := getJSON(events, id, &e); err != nil {
+				return fmt.Errorf("event %s: %w", id, err)
+			}
+			if err := mayTouch(caller, e.Owner()); err != nil {
 				return fmt.Errorf("event %s: %w", id, err)
 			}
 			if e.AcceptedAt == nil {
@@ -390,6 +537,8 @@ func (s *Store) Accept(eventIDs []string, taskID string, create *NewTask, next s
 			}
 			task = t
 		} else if err := getJSON(tasks, taskID, &task); err != nil {
+			return fmt.Errorf("task %s: %w", taskID, err)
+		} else if err := mayTouch(caller, task.Owner()); err != nil {
 			return fmt.Errorf("task %s: %w", taskID, err)
 		}
 		for _, e := range fresh {
@@ -441,6 +590,11 @@ func newTask(b *bolt.Bucket, n NewTask, now time.Time) (Task, error) {
 // UpdateTask changes a task's status, next action, checkpoint or result. A
 // task is only done with a result saying what was achieved.
 func (s *Store) UpdateTask(id string, u TaskUpdate) (Task, error) {
+	return s.UpdateTaskAs(MainAgent, id, u)
+}
+
+// UpdateTaskAs is UpdateTask by an agent, which may update only its own task.
+func (s *Store) UpdateTaskAs(caller, id string, u TaskUpdate) (Task, error) {
 	if u.Status != "" && !taskStates[u.Status] {
 		return Task{}, fmt.Errorf("status %q is not one of queued, working, waiting_approval, blocked, paused, done, cancelled", u.Status)
 	}
@@ -449,6 +603,12 @@ func (s *Store) UpdateTask(id string, u TaskUpdate) (Task, error) {
 		b := tx.Bucket(bTasks)
 		if err := getJSON(b, id, &t); err != nil {
 			return fmt.Errorf("task %s: %w", id, err)
+		}
+		if err := mayTouch(caller, t.Owner()); err != nil {
+			return fmt.Errorf("task %s: %w", id, err)
+		}
+		if u.Worktree != "" {
+			t.Worktree = u.Worktree
 		}
 		if u.Status != "" {
 			t.Status = u.Status
@@ -498,13 +658,25 @@ func (s *Store) Tasks(all bool) ([]Task, error) {
 }
 
 // Intend records an external action before it is attempted.
-func (s *Store) Intend(a Action) (Action, error) {
+func (s *Store) Intend(a Action) (Action, error) { return s.IntendAs(MainAgent, a) }
+
+// IntendAs is Intend by an agent: a worker records actions for its own task.
+func (s *Store) IntendAs(caller string, a Action) (Action, error) {
 	if a.Kind == "" || a.Target == "" || a.Intent == "" {
 		return Action{}, errors.New("an action needs a kind, a target and what it will do (intent)")
 	}
+	if caller != MainAgent && a.TaskID == "" {
+		return Action{}, fmt.Errorf("%w: give the task the action is for", ErrForbidden)
+	}
 	err := s.db.Update(func(tx *bolt.Tx) error {
-		if a.TaskID != "" && tx.Bucket(bTasks).Get([]byte(a.TaskID)) == nil {
-			return fmt.Errorf("task %s: %w", a.TaskID, ErrNotFound)
+		if a.TaskID != "" {
+			var t Task
+			if err := getJSON(tx.Bucket(bTasks), a.TaskID, &t); err != nil {
+				return fmt.Errorf("task %s: %w", a.TaskID, err)
+			}
+			if err := mayTouch(caller, t.Owner()); err != nil {
+				return fmt.Errorf("task %s: %w", a.TaskID, err)
+			}
 		}
 		b := tx.Bucket(bActions)
 		seq, err := b.NextSequence()
@@ -523,6 +695,11 @@ func (s *Store) Intend(a Action) (Action, error) {
 // there reaches the main session even before Linear's webhook for the
 // comment itself arrives.
 func (s *Store) Resolve(id, status, ref, note, threadID, issue string) (Action, error) {
+	return s.ResolveAs(MainAgent, id, status, ref, note, threadID, issue)
+}
+
+// ResolveAs is Resolve by an agent, for an action of its own task.
+func (s *Store) ResolveAs(caller, id, status, ref, note, threadID, issue string) (Action, error) {
 	if status != Happened && status != Failed {
 		return Action{}, fmt.Errorf("status %q must be %q or %q", status, Happened, Failed)
 	}
@@ -531,6 +708,12 @@ func (s *Store) Resolve(id, status, ref, note, threadID, issue string) (Action, 
 		b := tx.Bucket(bActions)
 		if err := getJSON(b, id, &a); err != nil {
 			return fmt.Errorf("action %s: %w", id, err)
+		}
+		if caller != MainAgent {
+			var t Task
+			if err := getJSON(tx.Bucket(bTasks), a.TaskID, &t); err != nil || t.Owner() != caller {
+				return fmt.Errorf("action %s: %w", id, ErrForbidden)
+			}
 		}
 		a.Status, a.Ref, a.Note, a.UpdatedAt = status, ref, note, s.now()
 		if status == Happened && threadID != "" {
