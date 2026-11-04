@@ -179,7 +179,7 @@ func (sv *Supervisor) check(ctx context.Context, a Agent, byName map[string]Sess
 			}
 		}
 		if a.Role == RoleWorker && !a.InTurn && !sv.hasWork(a) {
-			last := a.AttachedAt
+			last := a.LaunchedAt
 			if a.TurnAt.After(last) {
 				last = a.TurnAt
 			}
@@ -357,7 +357,7 @@ func (sv *Supervisor) freeSlot(ctx context.Context, agents []Agent) bool {
 		if a.Role != RoleWorker || a.State != AgentLive || a.InTurn || sv.hasWork(a) {
 			continue
 		}
-		last := a.AttachedAt
+		last := a.LaunchedAt
 		if a.TurnAt.After(last) {
 			last = a.TurnAt
 		}
