@@ -1,6 +1,6 @@
 # Agents: many sessions working at once
 
-Status: proposal, for review before any code.
+Status: accepted; being built behind `agents.enabled` (off by default).
 
 ## Why
 
@@ -44,28 +44,33 @@ What makes it feel powerful, and where it fails:
   outages whenever the machine it runs on sleeps.
 
 Our design keeps its strengths and makes its failure modes structurally
-impossible: every ask is stored and owned before it is acknowledged, a
-sweep finds any ask that is neither answered nor owned, replies are
-journaled once, and agents are supervised on a server.
+impossible: every ask is stored and owned before it is acknowledged, replies
+are journaled once, and agents are supervised on a server.
 
 ## Principles
 
 1. **Parallelism is decided by code.** Which session handles what is a
    routing decision Mahamantri makes and records. Prompts say how to do the
    work, never whether work may run in parallel.
-2. **The person can always reach the assistant.** The main session never
-   does long work itself; it stays free to talk.
-3. **One owner per piece of work, recorded.** Every task has exactly one
-   agent that owns it at a time, and every event goes to exactly one agent.
-   Nothing depends on a session remembering what it was given.
-4. **Enforced, not requested.** An agent can only act on its own tasks and
-   reply where its work is. Mistakes such as replying in another issue's
-   thread become impossible rather than discouraged.
+2. **The person can always reach the assistant.** The main session cannot
+   do long work itself (its editing tools are withheld); it dispatches.
+   When the account is at its usage limit no session can answer, and
+   Mahamantri's own notes on Linear are the only voice: it says so.
+3. **One owner per piece of work, recorded at once.** A conversation
+   belongs to at most one task, keyed by stable ids (a Linear issue's UUID,
+   not its identifier), and every event gets exactly one owning agent in the
+   same transaction that stores it. Nothing depends on a session remembering
+   what it was given.
+4. **Enforced where we can, honest where we can't.** The server checks
+   every Samrajya tool call against the caller's agent: a worker can only act
+   on its own task and reply in conversations linked to it. It cannot police
+   what a session does through other tools (git, the Linear connector), so
+   workers don't get the connector's write tools, and the rest is in their
+   role.
 5. **Surfaces and agents are plug-ins to one core.** Linear is the first
    surface and Claude Code the first agent runtime; neither is special in the
    core.
-6. **Everything survives restarts.** Mahamantri, any session, or the machine
-   can restart without losing events, tasks or who owns what.
+6. **Everything survives restarts**, and nothing is ever started twice.
 
 ## Model
 
@@ -73,153 +78,161 @@ journaled once, and agents are supervised on a server.
  surfaces                       Mahamantri core                        agents
  ────────                       ───────────────                        ──────
  Linear webhook ──┐                                               ┌─ main   (talks to the person)
- (later: chat,    ├─► inbox ─► router ─► per-agent queues ─► feed ┼─ worker (one per task)
-  voice, meeting) │     │         │                               └─ worker …
-                  │     ▼         ▼
-  replies ◄───────┴── journal   tasks ◄─ agent tools (accept, update, reply, report…)
-                                  │
-                       supervisor: start / stop / replace agents, cap, limits
+ (later: chat,    ├─► inbox+router ─► per-agent feeds ─► plugin ──┼─ worker (one per task)
+  voice, meeting) │        │                                      └─ worker …
+                  │        ▼
+  replies ◄───────┴── journal, tasks, agents ◄── agent tools (accept, update, reply, report…)
+                           │
+                supervisor: launch / fence / replace / stop, cap, limits
 ```
 
-- **Event**: something that arrived, from a surface or from Samrajya
-  itself. It carries a *conversation key* that says where it belongs and
-  where a reply goes: for Linear, the issue (`linear:<issue id>`) and the
-  thread. Later surfaces add their own keys (`chat:<chat id>`, …).
-- **Task**: a unit of work with an owner (`agent`), status, next action,
-  checkpoint and result, and the conversation(s) it serves.
-- **Agent**: a session Mahamantri knows: `id`, `role` (`main` or
-  `worker`), the task a worker serves, its runtime session id, state
-  (`starting`, `live`, `gone`, `stopped`), and its attachment.
-- **Router**: gives every new event to one agent, in code, in one store
-  transaction:
-  1. The conversation already belongs to an open task → that task's owner.
-  2. A Linear issue with no open task → a new task and a new worker for it.
-     A finished task on that issue is reopened instead of starting a second.
-  3. Anything else (no issue; a direct message; Samrajya notices for the
+- **Event**: something that arrived, from a surface or from Samrajya. It has
+  a *conversation key* (`linear:<issue uuid>`; later `chat:<id>` …), the
+  thread to reply in, and its owning agent.
+- **Task**: a unit of work with an owning agent, status, next action,
+  checkpoint, result, worktree, and the conversations linked to it (many
+  conversations to one task: an issue today; a chat thread or PR later).
+- **Agent**: a session Mahamantri runs: `id`, `role` (`main`, `worker`),
+  its task, a *generation*, its runtime session id, and its state:
+  `wanted` → `starting` → `live` → `stopped` (or `failed`). Separately: is it
+  in a turn, since when, and when it last ended one.
+- **Router**, inside the ingest transaction:
+  1. The conversation is linked to a task → that task's owner. A finished
+     task is reopened, not duplicated.
+  2. A Linear issue with no task, from a trusted author → a new task and a
+     new worker for it.
+  3. Anything else (untrusted authors, no issue, Samrajya notices for the
      main) → the main.
-  The main can move a task to another agent or to itself, and start a worker
-  for work that came from conversation (`samrajya_dispatch`).
-- **Supervisor**: makes the agents the router assigned exist. It starts a
-  worker through a *launcher* (first: `claude --bg`), keeps at most
-  `maxWorkers` running and queues the rest in order, notices a worker that
-  has gone (no feed for the attachment timeout) and replaces it from its
-  task's checkpoint when it has work, stops workers that are idle with no
-  open work, keeps the main running, and pauses starting anything while the
-  account is at its usage limit.
-- **Attachments, one per agent.** Each session's plugin attaches as its
-  agent id, which the launcher gives it. The single main attachment becomes
-  a table. A session without an agent id (someone's own Claude Code session
-  with the plugin loaded) stays read-only, as today.
+  The main can start a worker for anything (`samrajya_dispatch`), and the
+  same index makes a dispatch and a ping arriving together land on one task.
+- **Supervisor**, a loop in Mahamantri:
+  - *Launch*: an agent is recorded `starting` with a new generation before
+    its session is started under a unique name (`samrajya-<agent>-g<gen>`).
+    It must attach within a few minutes; otherwise it is stopped and retried
+    with backoff, and after three failures its task is blocked and the
+    person is told. A broken setup (plugin, login, allowlist) therefore
+    costs three tries, not a loop.
+  - *Reconcile*: at start and every minute, running sessions (`claude agents`)
+    are matched to agents by name and generation: matches are adopted,
+    anything else named `samrajya-*` is stopped.
+  - *Replace* (fence first): bump the generation, so the server refuses the
+    old session's calls; stop the old session and confirm its process is
+    gone; only then launch.
+  - *Has work*: a worker is (re)started only when its task has events it
+    has not accepted, or its task is `queued` or `working`. A task waiting
+    for approval, blocked, paused or in review waits for a new event.
+  - *Idle*: a worker with no work and no turn for 30 minutes is stopped.
+    Workers do not last; their context is the task's checkpoint, the branch
+    and the Linear thread, and the next worker starts from those.
+  - *Stuck*: a turn running for over 90 minutes is reported to the main and
+    shown in `samrajya_agents`; nothing is killed automatically.
+  - *Cap*: at most `maxWorkers` (default 2) run at once; the rest wait in
+    order, and their authors are told they are queued and behind how many.
+  - *Main*: kept running, as `keepMain` does today.
+- **Identity**: the launcher gives each session its agent id and the path of
+  a secret file (0600) through `--settings` env, which reaches the plugin
+  process. The plugin attaches with id, generation and secret. With agents
+  on, nothing attaches by directory: a session without a valid secret is
+  read-only. The plugin sends its protocol version; an incompatible one is
+  refused, and the supervisor recycles idle sessions on old versions.
 
-## What each role does
+## Roles
 
-**Main**: the person's assistant. It answers direct conversation and
-anything not tied to a task, keeps the overview ("what's running?"),
-dispatches work it is asked to do that will take a while, and passes
-messages to workers. It does short things itself and nothing long. Its role
-is in the system prompt (`--append-system-prompt-file`), so it outranks
-Claude Code's generic defaults, not in MCP instructions.
+Roles are system-prompt files (`--append-system-prompt-file`), so they
+outrank Claude Code's generic defaults; MCP instructions only explain the
+tools.
 
-**Worker**: owns one task. It gets that task's pings and nothing else,
-works in its own worktree as the project's rules say, replies in the task's
-threads, keeps its checkpoint current, and reports to the main when it
-finishes or is blocked. It stays reachable for follow-ups on its task; it
-does not take other work.
+**Main**: the person's assistant. Answers direct conversation and anything
+not tied to a task; keeps the overview; dispatches work; relays to workers.
+Started without Edit, Write and NotebookEdit, so it can investigate and
+answer but long work can only be dispatched.
 
-## Agent tools (plugin)
+**Worker**: owns one task. Its first piece of work arrives as its launch
+prompt (the task, its checkpoint and the pending events), not as a channel
+event; follow-ups arrive on the channel. It acknowledges a new ask within
+minutes with the plan and where results will appear, works in its own
+worktree as the project's rules say and records it on the task, replies in
+the task's conversations, keeps the checkpoint current, and reports when it
+finishes, is blocked or needs a decision. It takes no other work.
 
-Existing tools keep their names. Changes:
+## Tools
 
-- Every call carries the caller's attachment; the server checks the caller
-  owns the task, event or thread it touches (main may act on anything).
-- `samrajya_reply` is accepted only on the caller's task's issue.
-- New for the main: `samrajya_agents` (who is running what),
-  `samrajya_dispatch` (start a worker for a task or new request),
-  `samrajya_assign` (move a task), `samrajya_message` (send text to an
-  agent; it arrives as an event in that agent's feed), `samrajya_stop_agent`.
-- New for workers: `samrajya_report` (a short note to the main: finished,
-  blocked, needs a decision). Finishing a task notifies the main
-  automatically.
+Existing tools keep their names and are checked against the caller.
+New: for the main, `samrajya_agents`, `samrajya_dispatch`,
+`samrajya_message`, `samrajya_stop_agent`; for workers, `samrajya_report`.
+Reports are state shown by `samrajya_agents`; only `blocked` and
+`needs_decision` reach the main as events, so finishing workers do not keep
+the main in turns.
 
 ## Limits, status, nudges
 
-The usage limit belongs to the account, so it is one state: any session's
-`StopFailure` sets it, the supervisor starts nothing while it holds, and
-when it resets every agent with open work gets a resume notice. Senapati's
-Linear status still shows only problems (offline, limit, blocked). A ping
-waiting because `maxWorkers` is reached gets one note saying it is queued
-and behind how many; a ping to a live worker is answered by that worker.
-
-## No ask is missed
-
-Every event is owned by an agent the moment it is stored. A sweep checks
-that each one is acted on: an event its agent has not accepted within a few
-minutes is re-sent to that agent with a reminder; one still unhandled later
-is reported to the main and the person is told why it waits. A worker's
-first reply to a new ask restates the plan and says where results will
-appear, so the person sees within minutes that the right agent has it.
+The usage limit belongs to the account. A `StopFailure` from any agent sets
+it, with the agent's id. While it holds, nothing is launched. It clears at
+the parsed reset time, or when a tool call arrives more than a minute after
+it was set (proof that turns run again). After it clears, agents with work
+are resumed one at a time, main first. Senapati's Linear status shows only
+problems. A waiting ping's note says the real reason: queued behind N,
+starting, its worker mid-step, at the limit, or offline. A follow-up such as
+"stop" waits for the worker's current step; a hard stop is
+`samrajya_stop_agent` or Remote Control.
 
 ## Expansion seams
 
-- **Surfaces**: a surface is an ingest path producing events with a
-  conversation key, and a sender for replies to that key. A chat app the
-  person uses becomes a surface whose conversation routes to the main; a
-  meeting becomes a surface a worker owns for the meeting's length.
+- **Surfaces**: an ingest path producing events with a conversation key, and
+  a sender for replies. A chat app becomes a surface routed to the main, or
+  linked to a task; a meeting a surface a worker owns for its length.
 - **Agent kinds and runtimes**: roles and launchers are open sets. A voice
-  agent that needs real-time audio is a different runtime with its own
-  launcher speaking the same API; opencode can be a launcher for workers.
-- **Placement**: the API is HTTP with a token; a launcher could start
-  agents elsewhere later.
-
-None of these is built now. The point is that adding them adds a surface, a
-role or a launcher, and does not change routing, ownership or recovery.
+  agent cannot wait for another agent's turn, so task and agent state
+  (checkpoint, last activity, current turn) is a read API any agent can
+  query, and launchers have an interrupt operation, even where unimplemented.
+- **Observers**: every event has exactly one owner; others may subscribe
+  read-only later.
 
 ## Compatibility and rollout
 
-- `agents.workers: false` (default) routes everything to the main exactly
-  as today, and the existing tests keep passing. `mode: opencode` keeps
-  working with workers off.
-- A plugin session without an agent id behaves exactly as today, so an
-  updated plugin is safe with the current main session and vice versa.
-- Store schema 2 adds agents and per-event/task owners, upgraded in place
-  from 1 on first open, with a backup first.
+- `agents.enabled: false` (default) is today's behaviour, with today's tests.
+- A plugin session without an agent id behaves as today.
+- Store schema 2 (agents, conversations, owners) upgrades schema 1 in place,
+  after copying the file.
 - Built and tested in a sandbox: a second Mahamantri with its own config,
   store, ports, discovery file, session names and directory, a fake Linear
-  API, and real Claude Code sessions. The live setup is not touched.
-- Cutover at a time the person chooses: restart Mahamantri, start the main
-  afresh. Pings in between wait in the inbox. Rollback: workers off.
+  API, and real Claude Code sessions on a small model. The live setup is not
+  touched.
+- Cutover when the person chooses. Rollback: `agents.enabled: false`.
 
 ## Acceptance tests
 
-Agreed before code; the work is done when these pass.
-
 In Go, with a fake launcher and clock:
 
-1. Pings on three issues at once start three workers; each event reaches
-   only its own worker.
-2. A follow-up on the same issue, in any thread, reaches the same worker
-   and starts nothing.
-3. With `maxWorkers: 2`, a third issue waits, its author is told once that
-   it is queued, and it starts when a worker frees.
-4. A worker that disappears is replaced when it has work; the replacement
-   gets its pending events and the task's checkpoint; no duplicate worker.
-5. A worker cannot accept, update or reply for another task or issue.
-6. Non-issue events and finished/blocked reports reach the main; a message
-   from the main reaches the worker.
-7. At the usage limit nothing starts; after it resets each agent with open
-   work is told to resume.
-8. With workers off, behaviour is today's.
-9. After Mahamantri restarts, running sessions reattach as the same agents
-   and nothing is started twice.
-10. A worker idle with no open work is stopped; a new ping on its issue
-    reopens the task and starts a worker.
-11. An event its agent leaves unaccepted is re-sent with a reminder, then
-    reported to the main; none is ever left without an owner.
+1. Pings on three issues start three workers; each event reaches only its
+   own worker.
+2. Follow-ups on the same issue, in any thread, reach the same worker.
+3. Two pings for the same new issue ingested concurrently make one task and
+   one launch; so do a ping and a dispatch.
+4. An issue's identifier changing keeps routing to the same task.
+5. An untrusted ping on a new issue starts nothing and goes to the main.
+6. With `maxWorkers: 2`, a third issue waits and starts when one frees.
+7. A replaced worker's old generation is refused and stopped before the new
+   launch.
+8. Mahamantri dying between recording `starting` and the launch returning:
+   after restart nothing is duplicated; the orphan is adopted or stopped.
+9. A launch that keeps failing backs off, blocks the task and tells the
+   person after three tries.
+10. A long turn is not "gone"; a stuck turn is reported.
+11. A worker cannot accept, update or reply for another task.
+12. With agents on, a session without a valid secret is read-only, and
+    never becomes the main.
+13. A worker's tool call right after a limit doesn't clear it; resumes are
+    staggered, main first.
+14. A worker retired idle with its task in review is not restarted until a
+    new event; a new event restarts it.
+15. With agents off, behaviour is today's.
 
-Live, in the sandbox, with real Claude Code sessions:
+Live, in the sandbox:
 
-A. Three synthetic issues pinged together get three correct replies in
-   their own threads, while the main answers a direct question at once.
-B. A follow-up reaches the same worker, which still has the context.
+0. A launched worker attaches with its id and receives channel events.
+A. Three issues pinged together get three replies in their own threads,
+   while the main answers a direct message within a minute.
+B. A follow-up within the idle window reaches the same worker.
 C. Killing a worker's process: it is replaced and still answers.
-D. A simulated usage limit pauses starting, and work resumes after reset.
+D. A simulated usage limit pauses launches; work resumes after it clears.
