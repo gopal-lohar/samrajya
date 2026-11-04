@@ -56,6 +56,7 @@ type Server struct {
 	// (samrajya_stop_agent).
 	Supervisor interface {
 		StopAgent(ctx context.Context, id string) error
+		Queued(agent string) (ahead int, queued bool)
 	}
 
 	mu       sync.Mutex
@@ -542,12 +543,9 @@ func (s *Server) nudge(ctx context.Context, after time.Duration) {
 		if e.NudgedAt != nil || e.IssueID == "" || s.now().Sub(e.ReceivedAt) < after {
 			continue
 		}
-		reason, why := "offline", "I'm offline right now. It's queued, and I'll pick it up as soon as I'm back."
-		if until := s.limitedUntil(); !until.IsZero() {
-			reason = "limit " + until.Format(time.RFC3339)
-			why = "I'm at my usage limit until " + untilText(until) + ". It's queued, and I'll pick it up then."
-		} else if s.Live() {
-			reason, why = "busy", "I haven't started on it yet because I'm busy with other work. It's queued, and I'll pick it up as soon as I can."
+		reason, why := s.waitReason(e)
+		if reason == "" {
+			continue
 		}
 		// One comment per thread and reason: a second ping waiting for the
 		// same reason is covered by the first nudge.
@@ -579,6 +577,44 @@ func (s *Server) nudge(ctx context.Context, after time.Duration) {
 // status is what an agent needs after a restart or compaction: its own
 // pending events, open tasks and unresolved actions (everyone's for the
 // main and for a caller that is not attached), and who is attached.
+// waitReason is why a ping is still waiting, for the note that tells the
+// person: a short key (one note per thread and key) and the sentence. An
+// empty key means say nothing (the person was told otherwise).
+func (s *Server) waitReason(e Event) (string, string) {
+	if until := s.limitedUntil(); !until.IsZero() {
+		return "limit " + until.Format(time.RFC3339), "I'm at my usage limit until " + untilText(until) + ". It's queued, and I'll pick it up then."
+	}
+	owner := e.Owner()
+	if owner == MainAgent || !s.Agents {
+		if !s.Live() {
+			return "offline", "I'm offline right now. It's queued, and I'll pick it up as soon as I'm back."
+		}
+		return "busy", "I haven't started on it yet because I'm busy with other work. It's queued, and I'll pick it up as soon as I can."
+	}
+	a, err := s.Store.Agent(owner)
+	if err != nil {
+		return "", ""
+	}
+	switch a.State {
+	case AgentFailed:
+		return "", "" // the supervisor said it could not start
+	case AgentIdle:
+		if s.Supervisor != nil {
+			if ahead, queued := s.Supervisor.Queued(owner); queued {
+				if ahead == 0 {
+					return "queued", "Other work is using all my free slots right now. This is next in line, and I'll start on it as soon as one frees up."
+				}
+				return "queued", fmt.Sprintf("Other work is using all my free slots right now. This is queued with %d ahead of it.", ahead)
+			}
+		}
+		return "starting", "I'm about to start on it."
+	case AgentStarting:
+		return "starting", "I'm starting a session for it; it'll pick this up in a moment."
+	default:
+		return "busy", "I'm in the middle of a step on this issue's work, and I'll read this as soon as that step ends."
+	}
+}
+
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.init()

@@ -85,6 +85,8 @@ type Agent struct {
 	ReportAt time.Time `json:"reportAt,omitempty"`
 	// StuckNoted is the turn start already reported as stuck.
 	StuckNoted time.Time `json:"stuckNoted,omitempty"`
+	// ResumedAt is when it was last told to resume after a usage limit.
+	ResumedAt time.Time `json:"resumedAt,omitempty"`
 }
 
 // EnsureMain records the main agent if it is not yet.
@@ -149,8 +151,8 @@ func (s *Store) UpdateAgent(id string, f func(*Agent) error) (Agent, error) {
 // Launching fences out the agent's current session and records a new launch:
 // a new generation and secret, state starting, and in BriefSeq the last of
 // its pending events, which its launch brief carries. It returns the agent
-// as it must be launched.
-func (s *Store) Launching(id string) (Agent, error) {
+// as it must be launched, named <prefix>-<id>-g<gen>.
+func (s *Store) Launching(id, prefix string) (Agent, error) {
 	secret, err := newSecret()
 	if err != nil {
 		return Agent{}, err
@@ -177,7 +179,7 @@ func (s *Store) Launching(id string) (Agent, error) {
 		}
 		a.Gen++
 		a.Secret, a.State, a.Session, a.Error = secret, AgentStarting, "", ""
-		a.Name = fmt.Sprintf("samrajya-%s-g%d", a.ID, a.Gen)
+		a.Name = fmt.Sprintf("%s-%s-g%d", prefix, a.ID, a.Gen)
 		a.LaunchedAt, a.AttachedAt, a.InTurn, a.TurnAt = s.now(), time.Time{}, false, time.Time{}
 		return putJSON(b, a.ID, a)
 	})

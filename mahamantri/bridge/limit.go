@@ -74,6 +74,9 @@ func (s *Server) limitedUntil() time.Time {
 
 func (s *Server) setLimited(until time.Time) {
 	v := ""
+	if until.IsZero() && !s.limitedUntil().IsZero() {
+		s.Store.SetMeta(limitClearedKey, s.now().Format(time.RFC3339))
+	}
 	if !until.IsZero() {
 		v = until.Format(time.RFC3339)
 		s.Store.SetMeta(limitSetKey, s.now().Format(time.RFC3339))

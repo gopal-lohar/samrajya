@@ -217,11 +217,11 @@ func TestLaunchingFencesAndBriefsTheAgent(t *testing.T) {
 	s := workerStore(t)
 	s.Ingest(issuePing("ENG-1", "uuid-1", "c1", "c1"), "")
 	w := owner(t, s, "c1")
-	a1, err := s.Launching(w)
+	a1, err := s.Launching(w, "samrajya")
 	if err != nil {
 		t.Fatal(err)
 	}
-	a2, _ := s.Launching(w)
+	a2, _ := s.Launching(w, "samrajya")
 	if a2.Gen != a1.Gen+1 || a2.Secret == a1.Secret || a2.Name == a1.Name || a2.State != AgentStarting {
 		t.Errorf("relaunch %+v after %+v", a2, a1)
 	}

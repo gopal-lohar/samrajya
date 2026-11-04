@@ -22,7 +22,7 @@ func agentsServer(t *testing.T) (*Server, string, *fakeLinear) {
 // secret, as the plugin does.
 func attachAs(t *testing.T, s *Server, url, id string) *client {
 	t.Helper()
-	a, err := s.Store.Launching(id)
+	a, err := s.Store.Launching(id, "samrajya")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func TestAgentsModeAttachesOnlyWithTheAgentsSecret(t *testing.T) {
 	if code, _ := anon.do("POST", "/v1/attach", map[string]any{"agent": "main", "secret": "guess", "protocol": ProtocolVersion}); code != http.StatusForbidden {
 		t.Errorf("forged secret: %d", code)
 	}
-	a, _ := s.Store.Launching(MainAgent)
+	a, _ := s.Store.Launching(MainAgent, "samrajya")
 	if code, _ := anon.do("POST", "/v1/attach", map[string]any{"agent": "main", "secret": a.Secret}); code != http.StatusUpgradeRequired {
 		t.Errorf("old plugin protocol: %d", code)
 	}
@@ -84,7 +84,7 @@ func TestARelaunchFencesOutTheOldSession(t *testing.T) {
 	e, _ := s.Store.Event("linear:c1")
 	old := attachAs(t, s, url, e.Owner())
 	oldSecret, _ := s.Store.Agent(e.Owner())
-	if _, err := s.Store.Launching(e.Owner()); err != nil {
+	if _, err := s.Store.Launching(e.Owner(), "samrajya"); err != nil {
 		t.Fatal(err)
 	}
 	if code, _ := old.do("GET", "/v1/events?after=0&wait=0", nil); code != http.StatusConflict {
@@ -162,7 +162,7 @@ func TestHooksActAsTheirAgent(t *testing.T) {
 	s, url, _ := agentsServer(t)
 	s.Ingest(issuePing("ENG-1", "uuid-1", "c1", "c1"), "")
 	e, _ := s.Store.Event("linear:c1")
-	a, _ := s.Store.Launching(e.Owner())
+	a, _ := s.Store.Launching(e.Owner(), "samrajya")
 	hook := &client{t: t, url: url, token: "tok"}
 	if code, _ := hook.do("POST", "/v1/turn", map[string]any{"agent": a.ID, "secret": "wrong", "state": "start"}); code != http.StatusForbidden {
 		t.Errorf("forged turn: %d", code)
