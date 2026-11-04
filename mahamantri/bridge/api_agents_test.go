@@ -3,6 +3,7 @@ package bridge
 import (
 	"net/http"
 	"strings"
+	"time"
 	"testing"
 )
 
@@ -178,5 +179,18 @@ func TestHooksActAsTheirAgent(t *testing.T) {
 	}
 	if s.limitedUntil().IsZero() {
 		t.Error("limit not recorded")
+	}
+}
+
+// Found in the sandbox: a session ending (its plugin detaching) during a
+// usage limit ended the limit, and the main was relaunched into it.
+func TestADetachDoesNotEndTheLimit(t *testing.T) {
+	s, url, _ := agentsServer(t)
+	main := attachAs(t, s, url, MainAgent)
+	s.setLimited(time.Now().Add(time.Hour))
+	s.Store.SetMeta(limitSetKey, time.Now().Add(-time.Hour).Format(time.RFC3339))
+	main.do("POST", "/v1/detach", nil)
+	if s.limitedUntil().IsZero() {
+		t.Error("a detach ended the limit")
 	}
 }

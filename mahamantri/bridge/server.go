@@ -386,8 +386,9 @@ func (s *Server) withAgent(w http.ResponseWriter, r *http.Request, next agentHan
 		writeJSON(w, http.StatusConflict, map[string]any{"error": "this session is not attached as one of Samrajya's agents", "attached": main})
 		return
 	}
-	if r.Method == http.MethodPost {
-		// The session is calling tools, so turns run again.
+	if r.Method == http.MethodPost && r.URL.Path != "/v1/detach" {
+		// The session is calling tools, so turns run again. (A detach is
+		// its session ending, which proves nothing.)
 		s.clearLimitOnActivity()
 	}
 	next(w, r, att.agent)
