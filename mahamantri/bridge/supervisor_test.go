@@ -405,3 +405,35 @@ func TestAPingWaitingForASlotSaysSo(t *testing.T) {
 		t.Errorf("nudges %v", cm)
 	}
 }
+
+// A queued task does not wait for an idle worker's idle timeout: a worker
+// with nothing to do gives up its slot a minute after its last turn.
+func TestAnIdleWorkerGivesUpItsSlotToQueuedWork(t *testing.T) {
+	r := newRig(t)
+	w1, w2 := r.ping("ENG-1", "c1"), r.ping("ENG-2", "c2")
+	w3 := r.ping("ENG-3", "c3")
+	r.tick()
+	r.attach(MainAgent)
+	for _, w := range []string{w1, w2} {
+		c := r.attach(w)
+		a := mustAgent(t, r, w)
+		r.s.Store.AcceptAs(w, []string{"linear:c" + w[len(w)-1:]}, a.TaskID, nil, "x")
+		c.do("POST", "/v1/turn", map[string]any{"agent": w, "secret": a.Secret, "state": "end"})
+	}
+	r.s.Store.UpdateTaskAs(MainAgent, mustAgent(t, r, w1).TaskID, TaskUpdate{Status: Done, Result: "done"})
+	r.advance(30 * time.Second)
+	r.keepAlive()
+	r.tick()
+	if contains(r.l.launched(), "samrajya-"+w3+"-g1") {
+		t.Fatal("took the slot before the grace")
+	}
+	r.advance(time.Minute)
+	r.keepAlive()
+	r.tick()
+	if !contains(r.l.launched(), "samrajya-"+w3+"-g1") || !contains(r.l.stops, "samrajya-"+w1+"-g1") {
+		t.Errorf("launched %v, stopped %v", r.l.launched(), r.l.stops)
+	}
+	if a := mustAgent(t, r, w2); a.State != AgentLive {
+		t.Errorf("stopped the worker with work: %s", a.State)
+	}
+}

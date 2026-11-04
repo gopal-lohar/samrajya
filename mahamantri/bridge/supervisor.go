@@ -333,7 +333,7 @@ func (sv *Supervisor) launch(ctx context.Context) {
 	_, slow := sv.recentlyLimited()
 	for _, a := range want {
 		if a.Role == RoleWorker {
-			if active >= sv.MaxWorkers {
+			if active >= sv.MaxWorkers && !sv.freeSlot(ctx, agents) {
 				return
 			}
 			active++
@@ -343,6 +343,41 @@ func (sv *Supervisor) launch(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// slotGrace is how long a worker with nothing to do keeps its slot when
+// other work is waiting for one: long enough to answer a quick follow-up.
+const slotGrace = time.Minute
+
+// freeSlot stops one running worker that has nothing to do, so that queued
+// work can start now rather than when it would be stopped for idling. It
+// reports whether it freed a slot.
+func (sv *Supervisor) freeSlot(ctx context.Context, agents []Agent) bool {
+	for _, a := range agents {
+		if a.Role != RoleWorker || a.State != AgentLive || a.InTurn || sv.hasWork(a) {
+			continue
+		}
+		last := a.AttachedAt
+		if a.TurnAt.After(last) {
+			last = a.TurnAt
+		}
+		if sv.now().Sub(last) < slotGrace {
+			continue
+		}
+		sv.Logger.Printf("supervisor: stopping %s, which has nothing to do, to free a slot", a.ID)
+		sv.retire(ctx, a, sv.runningByName(ctx), "")
+		return true
+	}
+	return false
+}
+
+func (sv *Supervisor) runningByName(ctx context.Context) map[string]Session {
+	running, _ := sv.Launcher.Running(ctx)
+	byName := map[string]Session{}
+	for _, r := range running {
+		byName[r.Name] = r
+	}
+	return byName
 }
 
 // Queued reports how many workers with work are waiting for a free slot
@@ -411,12 +446,7 @@ func (sv *Supervisor) StopAgent(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	running, _ := sv.Launcher.Running(ctx)
-	byName := map[string]Session{}
-	for _, r := range running {
-		byName[r.Name] = r
-	}
-	sv.retire(ctx, a, byName, "stopped by the main session")
+	sv.retire(ctx, a, sv.runningByName(ctx), "stopped by the main session")
 	if t, err := sv.Store.Task(a.TaskID); err == nil && t.Open() {
 		sv.Store.UpdateTaskAs(MainAgent, t.ID, TaskUpdate{Status: Paused})
 	}

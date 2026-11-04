@@ -44,6 +44,8 @@ type Config struct {
 		// blocked, and tells the person when a ping waits too long.
 		// Optional.
 		APIKey string `yaml:"apiKey"`
+		// APIURL replaces Linear's GraphQL endpoint (for testing).
+		APIURL string `yaml:"apiURL"`
 		// ReceivedEmoji is the reaction a ping gets once stored. Default 👀.
 		ReceivedEmoji string `yaml:"receivedEmoji"`
 		// NudgeAfter is how long a ping may wait unaccepted before its author

@@ -69,7 +69,7 @@ func run(configPath string) error {
 	}
 	srv := &bridge.Server{Store: store, Token: token, Logger: logger}
 	if cfg.Linear.APIKey != "" {
-		srv.Linear, srv.Received = &linear.API{Key: cfg.Linear.APIKey}, cfg.Linear.ReceivedEmoji
+		srv.Linear, srv.Received = &linear.API{Key: cfg.Linear.APIKey, URL: cfg.Linear.APIURL}, cfg.Linear.ReceivedEmoji
 	}
 	if cfg.Brain != "" {
 		if srv.Brain, err = brain.Open(cfg.Brain, func() []string { return projects(cfg.Workspace) }); err != nil {
