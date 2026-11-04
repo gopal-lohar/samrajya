@@ -12,6 +12,27 @@ export interface Discovery {
   mainDirectory?: string;
 }
 
+/** The bridge protocol this plugin speaks with an agent id (mahamantri's bridge.ProtocolVersion). */
+export const PROTOCOL = 2;
+
+/** This session's identity as one of Samrajya's agents. */
+export interface Agent {
+  id: string;
+  secret: string;
+}
+
+/** The agent this session was launched as, from the environment its launcher set; undefined in legacy mode. */
+export async function agentFromEnv(env: NodeJS.ProcessEnv = process.env): Promise<Agent | undefined> {
+  const id = env.SAMRAJYA_AGENT;
+  const file = env.SAMRAJYA_AGENT_SECRET_FILE;
+  if (!id || !file) return undefined;
+  try {
+    return { id, secret: (await readFile(file, 'utf8')).trim() };
+  } catch {
+    return { id, secret: '' };
+  }
+}
+
 export class BridgeError extends Error {
   constructor(readonly status: number, message: string, readonly body?: unknown) {
     super(message);
@@ -86,10 +107,17 @@ export class Bridge {
     return (await real(dir)) === (await real(main));
   }
 
-  /** Attach as the main session. Returns false when another session holds it. */
-  async attach(client: string, takeover = false): Promise<boolean> {
+  /**
+   * Attach: as an agent (agents mode), with the agent id and the secret its
+   * launcher gave it, or as the main session (legacy mode). Returns false
+   * when the bridge will not have this session (another holds the main
+   * attachment, or this session is no agent); throws BridgeError 403 when
+   * its secret is stale - it has been replaced or stopped.
+   */
+  async attach(client: string, takeover = false, agent?: Agent): Promise<boolean> {
     try {
-      const out = await this.request<{ attachment: string }>('POST', '/v1/attach', { client, takeover });
+      const body = agent ? { client, agent: agent.id, secret: agent.secret, protocol: PROTOCOL } : { client, takeover };
+      const out = await this.request<{ attachment: string }>('POST', '/v1/attach', body);
       this.attachment = out.attachment;
       return true;
     } catch (error) {

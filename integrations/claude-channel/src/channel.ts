@@ -1,6 +1,6 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { Bridge, BridgeError } from './bridge.js';
+import { Bridge, BridgeError, type Agent } from './bridge.js';
 
 // The Samrajya channel: runs inside Samrajya's main Claude Code session,
 // pushes Linear pings from mahamantri's durable inbox into it, and gives it
@@ -35,6 +35,11 @@ Samrajya's memory of the work is a set of short notes (samrajya_status shows the
 
 Project-specific rules (worktrees, dependencies, services, branches) live in the projects' own instruction files; follow them. If samrajya_status says this session is not the main one (another is attached, or this one runs outside the main directory), do not take over unless the person tells you this session is now the main.`;
 
+// In agents mode each session's role is in its system prompt (mahamantri
+// appends senapati/main.md or senapati/worker.md); the channel's own
+// instructions only explain the channel and the tools.
+export const agentInstructions = `Samrajya's channel. Events from Samrajya arrive as <channel source="samrajya"> messages: Linear comments routed to you, messages from other agents, and notices from Samrajya. Accept each with samrajya_accept before acting on it (a worker: with its task_id). Post on Linear only with samrajya_reply. Keep your task current with samrajya_update_task. After a restart or compaction, call samrajya_status first: it lists what is pending for you, your open tasks and actions whose outcome was never recorded (check Linear before redoing one). Your role, in your system prompt, says how to work.`;
+
 export interface Event {
   id: string;
   seq: number;
@@ -52,9 +57,11 @@ export interface Event {
 
 export function render(e: Event): { content: string; meta: Record<string, string> } {
   if (e.source && e.source !== 'linear') {
-    // A notice from Samrajya itself, such as a usage limit having reset.
+    // A notice from Samrajya itself, such as a usage limit having reset, or
+    // a message from another agent.
+    const who = e.kind === 'message' && e.author ? `Message from agent ${e.author}` : 'Samrajya';
     return {
-      content: `Samrajya: ${e.body.trim()}\nAcknowledge it with samrajya_accept (event_id ${e.id}); it needs no task.`,
+      content: `${who}: ${e.body.trim()}\nAcknowledge it with samrajya_accept (event_id ${e.id}); it needs no task.`,
       meta: { event_id: e.id, kind: e.kind, trusted: 'true' },
     };
   }
@@ -197,13 +204,69 @@ const tools = [
     inputSchema: { type: 'object', properties: { name: str('Note to delete') }, required: ['name'], additionalProperties: false },
   },
   {
+    name: 'samrajya_agents',
+    description: 'Every agent (the main and one worker per task): its task, state (idle, starting, live, failed), whether it is mid-step, and its last report.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'samrajya_dispatch',
+    description: 'Give work to a worker session of its own, which starts at once (or when a slot frees) and reports back. For anything that takes more than a few minutes or changes files. With issue_id, work on that Linear issue goes to its existing worker if it has one.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: str('Short title of the task'),
+        brief: str('What to do, what done looks like, any limits'),
+        project: str('Workspace project'),
+        issue: str('Linear issue identifier, e.g. ENG-1'),
+        issue_id: str('Linear issue UUID'),
+        thread_id: str('Linear thread to report in'),
+      },
+      required: ['brief'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'samrajya_message',
+    description: 'Send text to another agent; it arrives on their Samrajya channel when their current step ends. A worker can message only the main.',
+    inputSchema: { type: 'object', properties: { to: str('Agent id (default: main)'), body: str('The message') }, required: ['body'], additionalProperties: false },
+  },
+  {
+    name: 'samrajya_stop_agent',
+    description: 'Stop a worker at once; its task is paused until a new event or dispatch.',
+    inputSchema: { type: 'object', properties: { agent: str('Agent id, e.g. w-T3') }, required: ['agent'], additionalProperties: false },
+  },
+  {
+    name: 'samrajya_report',
+    description: 'Report on your task to the main session: progress, done, blocked or needs_decision. Blocked and needs_decision reach it at once; the rest show in samrajya_agents.',
+    inputSchema: {
+      type: 'object',
+      properties: { kind: { type: 'string', enum: ['progress', 'done', 'blocked', 'needs_decision'] }, body: str('What happened, with evidence') },
+      required: ['kind', 'body'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'samrajya_take_over',
     description: 'Make this session the main one, replacing the session attached now. Only when the person says this session is now the main.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
 ];
 
+const legacyTools = new Set(['samrajya_status', 'samrajya_accept', 'samrajya_create_task', 'samrajya_update_task', 'samrajya_tasks',
+  'samrajya_reply', 'samrajya_action_intent', 'samrajya_action_result', 'samrajya_memory', 'samrajya_remember', 'samrajya_forget', 'samrajya_take_over']);
+const workerTools = new Set(['samrajya_status', 'samrajya_accept', 'samrajya_update_task', 'samrajya_tasks', 'samrajya_reply',
+  'samrajya_action_intent', 'samrajya_action_result', 'samrajya_memory', 'samrajya_remember', 'samrajya_forget', 'samrajya_report', 'samrajya_message']);
+
+/** The tools a session has: legacy (no agent), the main agent, or a worker. */
+export function toolsFor(agent?: Agent) {
+  if (!agent) return tools.filter((t) => legacyTools.has(t.name));
+  if (agent.id === 'main') return tools.filter((t) => t.name !== 'samrajya_take_over' && t.name !== 'samrajya_report');
+  return tools.filter((t) => workerTools.has(t.name));
+}
+
 export interface ChannelOptions {
+  /** This session's agent identity (agents mode); none in legacy mode. */
+  agent?: Agent;
   discoveryPath: string;
   /** This session is the main one wherever it runs (opencode sets SAMRAJYA_MAIN=1). */
   main?: boolean;
@@ -219,15 +282,16 @@ export function createChannel(opts: ChannelOptions) {
   const bridge = new Bridge(opts.discoveryPath);
   const client = opts.clientName ?? `claude-channel pid ${process.pid}`;
   const notified = new Set<string>();
-  let state: 'starting' | 'attached' | 'passive' | 'elsewhere' | 'disconnected' = 'starting';
+  let state: 'starting' | 'attached' | 'passive' | 'elsewhere' | 'disconnected' | 'replaced' = 'starting';
   let lastError = '';
   let stopped = false;
   let running: Promise<void> | undefined;
   const abort = new AbortController();
 
-  const mcp = new Server({ name: 'samrajya', version: '0.1.6' }, {
+  const agent = opts.agent;
+  const mcp = new Server({ name: 'samrajya', version: '0.2.0' }, {
     capabilities: { experimental: { 'claude/channel': {} }, tools: {} },
-    instructions,
+    instructions: agent ? agentInstructions : instructions,
   });
 
   let wake = () => {};
@@ -247,12 +311,12 @@ export function createChannel(opts: ChannelOptions) {
         if (!bridge.attachment) {
           // Every session with the plugin loaded runs this; only the one in
           // the main directory may claim the main slot unasked.
-          if (!opts.main && !(await bridge.isMainDirectory(opts.directory ?? process.cwd()))) {
+          if (!agent && !opts.main && !(await bridge.isMainDirectory(opts.directory ?? process.cwd()))) {
             state = 'elsewhere';
             await sleep(opts.heldRetryMs ?? 15000);
             continue;
           }
-          if (!(await bridge.attach(client))) {
+          if (!(await bridge.attach(client, false, agent))) {
             state = 'passive';
             await sleep(opts.heldRetryMs ?? 15000);
             continue;
@@ -272,6 +336,14 @@ export function createChannel(opts: ChannelOptions) {
         backoff = 1000;
       } catch (error) {
         if (stopped) return;
+        if (error instanceof BridgeError && (error.status === 403 || error.status === 426) && agent && !bridge.attachment) {
+          // This launch was replaced or stopped (or the plugin is too old):
+          // it must not act. Check again now and then, quietly.
+          state = 'replaced';
+          lastError = error.message;
+          await sleep(opts.maxBackoffMs ?? 60000);
+          continue;
+        }
         if (error instanceof BridgeError && error.status === 409) {
           // Replaced by another session: attach again (refused while it is
           // live). Unless this session took over meanwhile.
@@ -319,6 +391,18 @@ export function createChannel(opts: ChannelOptions) {
       case 'samrajya_forget':
         await bridge.request('DELETE', `/brain/${encodeURIComponent(a.name)}`);
         return `Forgot ${a.name}.`;
+      case 'samrajya_agents':
+        return bridge.request('GET', '/v1/agents');
+      case 'samrajya_dispatch':
+        return bridge.request('POST', '/v1/dispatch', {
+          title: a.title, brief: a.brief, project: a.project, issue: a.issue, issueId: a.issue_id, threadId: a.thread_id,
+        });
+      case 'samrajya_message':
+        return bridge.request('POST', '/v1/message', { to: a.to, body: a.body });
+      case 'samrajya_stop_agent':
+        return bridge.request('POST', `/v1/agents/${encodeURIComponent(a.agent)}/stop`);
+      case 'samrajya_report':
+        return bridge.request('POST', '/v1/report', { kind: a.kind, body: a.body });
       case 'samrajya_take_over':
         if (!(await bridge.attach(client, true))) throw new Error('take over refused');
         state = 'attached';
@@ -329,14 +413,18 @@ export function createChannel(opts: ChannelOptions) {
     }
   }
 
-  mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
+  const mine = toolsFor(agent);
+  mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: mine }));
   mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
+    if (!mine.some((t) => t.name === req.params.name)) return fail(`unknown tool ${req.params.name}`);
     try {
       return text(await call(req.params.name, req.params.arguments ?? {}));
     } catch (error) {
       if (error instanceof BridgeError && error.status === 409) {
-        return fail('This session is not the main one: another session is attached. ' +
-          'Use samrajya_take_over only if the person says this session is now the main.');
+        return fail(agent
+          ? 'This session is not attached to Samrajya (it may have been replaced or stopped), so it cannot act.'
+          : 'This session is not the main one: another session is attached. ' +
+            'Use samrajya_take_over only if the person says this session is now the main.');
       }
       return fail(error instanceof Error ? error.message : String(error));
     }

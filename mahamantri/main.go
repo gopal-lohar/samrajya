@@ -77,6 +77,25 @@ func run(configPath string) error {
 		}
 	}
 
+	var sv *bridge.Supervisor
+	if cfg.Agents.Enabled {
+		srv.Agents = true
+		store.RouteToWorkers(true)
+		if _, err := store.EnsureMain(); err != nil {
+			return err
+		}
+		sv = &bridge.Supervisor{Store: store, Server: srv, Logger: logger, Prefix: cfg.Agents.NamePrefix, MaxWorkers: cfg.Agents.MaxWorkers,
+			Launcher: &claudeLauncher{
+				command: cfg.Agents.Command, dir: cfg.Bridge.MainDirectory, discovery: cfg.Bridge.DiscoveryFile,
+				stateDir: cfg.Agents.StateDir, channel: cfg.Agents.Channel,
+				mainRole: cfg.Agents.MainRole, workerRole: cfg.Agents.WorkerRole,
+				mainArgs: cfg.Agents.MainArgs, workerArgs: cfg.Agents.WorkerArgs,
+				remote: cfg.Agents.RemoteControl, workerRC: cfg.Agents.WorkerRemote,
+				store: store, run: runIn,
+			}}
+		srv.Supervisor = sv
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	var oc *opencodeMain
@@ -118,12 +137,18 @@ func run(configPath string) error {
 	if cfg.Mode == "claude" && len(cfg.Bridge.KeepMain) > 0 {
 		go newKeepMain(cfg.Bridge.KeepMain, srv.Live, logger).loop(ctx, 30*time.Second)
 	}
+	if sv != nil {
+		go sv.Loop(ctx, 15*time.Second)
+	}
 	statusDone := make(chan struct{})
 	go func() { srv.Watch(ctx, 20*time.Second, cfg.Linear.NudgeAfter); close(statusDone) }()
 
 	rec, err := store.Recovery()
 	if err != nil {
 		return err
+	}
+	if sv != nil {
+		fmt.Fprintf(os.Stderr, "  agents: on, up to %d workers, sessions named %s-*\n", cfg.Agents.MaxWorkers, cfg.Agents.NamePrefix)
 	}
 	logger.Printf("mahamantri (%s): bridge on %s, Linear webhook on %s, store %s", cfg.Mode, base, linearLn.Addr(), cfg.Bridge.Store)
 	fmt.Fprintf(os.Stderr, "mahamantri (%s): bridge %s, Linear webhook %s\n"+

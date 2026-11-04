@@ -12,7 +12,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { z } from 'zod';
-import { createChannel, instructions, render } from '../src/channel.js';
+import { agentFromEnv, type Agent } from '../src/bridge.js';
+import { createChannel, instructions, render, toolsFor } from '../src/channel.js';
 import type { Event } from '../src/channel.js';
 
 const channelSchema = z.object({
@@ -70,12 +71,14 @@ class FakeBridge {
     if (req.headers.authorization !== `Bearer ${this.token}`) return send(401, { error: 'bad token' });
     const held = () => attachment !== this.holder || !this.holder;
     if (req.method === 'POST' && url.pathname === '/v1/attach') {
-      if (this.holderLive && !body.takeover) return send(409, { error: 'held' });
+      if (body.agent && body.secret === 'stale') return send(403, { error: 'stale secret' });
+      if (this.holderLive && !body.takeover && !body.agent) return send(409, { error: 'held' });
       this.holder = `att-${++this.gen}`;
       this.holderLive = true;
       return send(200, { attachment: this.holder, generation: this.gen });
     }
     if (url.pathname === '/v1/limit') return send(200, { until: '2026-11-02T19:10:00Z' });
+    if (url.pathname === '/v1/turn') return send(200, { ok: true });
     if (url.pathname === '/v1/status') return send(200, { attached: { live: this.holderLive }, recovery: { pending: this.pendingAfter(0) } });
     if (held()) return send(409, { error: 'not attached' });
     if (url.pathname === '/v1/events') {
@@ -109,14 +112,14 @@ class FakeBridge {
   }
 }
 
-async function setup(t: TestContext, opts: { start?: boolean; bridge?: FakeBridge; mainDirectory?: string } = {}) {
+async function setup(t: TestContext, opts: { start?: boolean; bridge?: FakeBridge; mainDirectory?: string; agent?: Agent } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'samrajya-channel-'));
   const discoveryPath = join(dir, 'bridge.json');
   const bridge = opts.bridge ?? new FakeBridge();
   await bridge.listen();
   const writeDiscovery = () => writeFile(discoveryPath, JSON.stringify({ url: bridge.url, token: bridge.token, mainDirectory: opts.mainDirectory }));
   await writeDiscovery();
-  const channel = createChannel({ discoveryPath, directory: dir, pollSeconds: 1, heldRetryMs: 100, maxBackoffMs: 100 });
+  const channel = createChannel({ discoveryPath, directory: dir, pollSeconds: 1, heldRetryMs: 100, maxBackoffMs: 100, agent: opts.agent });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 'test', version: '0.0.1' });
   const notifications: Notification[] = [];
@@ -345,4 +348,69 @@ test('the StopFailure hook reports only the main session hitting its usage limit
   assert.equal(bridge.requests.filter((r) => r.path === '/v1/limit').length, 0);
   assert.equal(await hook({ error: 'rate_limit', cwd: dir, last_assistant_message: message, error_details: '429' }), 0);
   assert.deepEqual(bridge.requests.find((r) => r.path === '/v1/limit')?.body, { message, details: '429' });
+});
+
+test('an agent attaches with its id and secret wherever it runs, and has its role\'s tools', async (t) => {
+  const { bridge, channel, client, notifications } = await setup(t, { mainDirectory: '/somewhere/else', agent: { id: 'w-T3', secret: 's3' } });
+  await until(() => channel.state === 'attached', 'attached');
+  const attach = bridge.requests.find((r) => r.path === '/v1/attach');
+  assert.deepEqual({ ...attach?.body, client: undefined }, { client: undefined, agent: 'w-T3', secret: 's3', protocol: 2 });
+  bridge.push(event('linear:c9', 9));
+  await until(() => notifications.length === 1, 'the ping');
+  const names = (await client.listTools()).tools.map((x) => x.name);
+  assert.ok(names.includes('samrajya_report') && names.includes('samrajya_reply'));
+  assert.ok(!names.includes('samrajya_dispatch') && !names.includes('samrajya_take_over') && !names.includes('samrajya_create_task'));
+  const r = await client.callTool({ name: 'samrajya_dispatch', arguments: { brief: 'x' } });
+  assert.equal(r.isError, true);
+});
+
+test('the main agent can dispatch and see the agents; legacy sessions keep their tools', () => {
+  const main = toolsFor({ id: 'main', secret: 'x' }).map((x) => x.name);
+  for (const name of ['samrajya_dispatch', 'samrajya_agents', 'samrajya_message', 'samrajya_stop_agent']) assert.ok(main.includes(name), name);
+  assert.ok(!main.includes('samrajya_take_over'));
+  const legacy = toolsFor().map((x) => x.name);
+  assert.ok(legacy.includes('samrajya_take_over') && !legacy.includes('samrajya_dispatch'));
+});
+
+test('a replaced agent session stops acting', async (t) => {
+  const { bridge, channel, notifications } = await setup(t, { agent: { id: 'w-T3', secret: 'stale' } });
+  bridge.push(event('linear:c9', 9));
+  await until(() => channel.state === 'replaced', 'replaced');
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(notifications.length, 0);
+  assert.ok(!bridge.requests.some((r) => r.path.startsWith('/v1/events')));
+});
+
+test('an agent reads its identity from the environment its launcher set', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'samrajya-agent-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(join(dir, 'w.secret'), 's3\n');
+  assert.deepEqual(await agentFromEnv({ SAMRAJYA_AGENT: 'w-T3', SAMRAJYA_AGENT_SECRET_FILE: join(dir, 'w.secret') }), { id: 'w-T3', secret: 's3' });
+  assert.equal(await agentFromEnv({}), undefined);
+});
+
+test('the turn hooks report an agent\'s turns, and nothing in legacy mode', { timeout: 20000 }, async (t) => {
+  const bridge = new FakeBridge();
+  await bridge.listen();
+  const dir = await mkdtemp(join(tmpdir(), 'samrajya-turn-'));
+  const discoveryPath = join(dir, 'bridge.json');
+  await writeFile(discoveryPath, JSON.stringify({ url: bridge.url, token: bridge.token, mainDirectory: dir }));
+  await writeFile(join(dir, 'w.secret'), 's3');
+  t.after(async () => {
+    await bridge.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+  const hook = (state: string, env: Record<string, string>) => new Promise<number>((resolve) => {
+    const child = spawn(process.execPath, [fileURLToPath(new URL('../../plugin/server.mjs', import.meta.url)), '--turn', state],
+      { env: { ...process.env, SAMRAJYA_BRIDGE_FILE: discoveryPath, ...env }, stdio: ['pipe', 'ignore', 'ignore'] });
+    child.on('exit', (code) => resolve(code ?? -1));
+    child.stdin.end('{}');
+  });
+  assert.equal(await hook('start', {}), 0);
+  assert.equal(bridge.requests.filter((r) => r.path === '/v1/turn').length, 0);
+  assert.equal(await hook('start', { SAMRAJYA_AGENT: 'w-T3', SAMRAJYA_AGENT_SECRET_FILE: join(dir, 'w.secret') }), 0);
+  assert.equal(await hook('end', { SAMRAJYA_AGENT: 'w-T3', SAMRAJYA_AGENT_SECRET_FILE: join(dir, 'w.secret') }), 0);
+  assert.deepEqual(bridge.requests.filter((r) => r.path === '/v1/turn').map((r) => r.body), [
+    { agent: 'w-T3', secret: 's3', state: 'start' }, { agent: 'w-T3', secret: 's3', state: 'end' },
+  ]);
 });

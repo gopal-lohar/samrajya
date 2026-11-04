@@ -99,6 +99,35 @@ type Config struct {
 	// and the log file, resolve against it - not against wherever the
 	// program happened to be launched from.
 	Dir string `yaml:"-"`
+
+	// Agents runs several Claude Code sessions at once (mode claude only):
+	// a main that talks to the person and a worker per task, launched and
+	// supervised by mahamantri. See docs/design/agents.md.
+	Agents struct {
+		Enabled    bool `yaml:"enabled"`
+		MaxWorkers int  `yaml:"maxWorkers"`
+		// NamePrefix starts every session name mahamantri launches; sessions
+		// with the prefix that are no agent's current launch are stopped.
+		NamePrefix string `yaml:"namePrefix"`
+		// Command is the claude executable.
+		Command string `yaml:"command"`
+		// MainRole and WorkerRole are the role files appended to each
+		// session's system prompt.
+		MainRole   string `yaml:"mainRole"`
+		WorkerRole string `yaml:"workerRole"`
+		// MainArgs and WorkerArgs are added to each launch, e.g. --model.
+		MainArgs   []string `yaml:"mainArgs"`
+		WorkerArgs []string `yaml:"workerArgs"`
+		// RemoteControl names the main session's Remote Control session;
+		// workers get theirs named after their task. Empty: none.
+		RemoteControl string `yaml:"remoteControl"`
+		WorkerRemote  bool   `yaml:"workerRemoteControl"`
+		// StateDir holds each agent's secret file (default next to the
+		// discovery file).
+		StateDir string `yaml:"stateDir"`
+		// Channel is the channel plugin sessions load.
+		Channel string `yaml:"channel"`
+	} `yaml:"agents"`
 }
 
 func (c Config) LogFile() string { return filepath.Join(c.Dir, "mahamantri.log") }
@@ -161,7 +190,29 @@ func Load(path string) (Config, error) {
 	if c.Opencode.InstructionsFile == "" {
 		c.Opencode.InstructionsFile = "../senapati/senapati.md"
 	}
-	paths := []*string{&c.Workspace, &c.Brain, &c.Bridge.Store, &c.Bridge.DiscoveryFile, &c.Bridge.MainDirectory, &c.Opencode.InstructionsFile}
+	if c.Agents.MaxWorkers == 0 {
+		c.Agents.MaxWorkers = 2
+	}
+	if c.Agents.NamePrefix == "" {
+		c.Agents.NamePrefix = "samrajya"
+	}
+	if c.Agents.Command == "" {
+		c.Agents.Command = "claude"
+	}
+	if c.Agents.MainRole == "" {
+		c.Agents.MainRole = "../senapati/main.md"
+	}
+	if c.Agents.WorkerRole == "" {
+		c.Agents.WorkerRole = "../senapati/worker.md"
+	}
+	if c.Agents.StateDir == "" {
+		c.Agents.StateDir = filepath.Join(filepath.Dir(c.Bridge.DiscoveryFile), "agents")
+	}
+	if c.Agents.Channel == "" {
+		c.Agents.Channel = "plugin:samrajya@samrajya"
+	}
+	paths := []*string{&c.Workspace, &c.Brain, &c.Bridge.Store, &c.Bridge.DiscoveryFile, &c.Bridge.MainDirectory, &c.Opencode.InstructionsFile,
+		&c.Agents.MainRole, &c.Agents.WorkerRole, &c.Agents.StateDir}
 	if len(c.Bridge.KeepMain) > 0 && strings.ContainsRune(c.Bridge.KeepMain[0], '/') {
 		paths = append(paths, &c.Bridge.KeepMain[0])
 	}
@@ -219,6 +270,25 @@ func (c Config) Validate() error {
 	case !loopback(c.Bridge.ListenAddr):
 		return fmt.Errorf("bridge.listenAddr %q must be a loopback address such as 127.0.0.1:4098", c.Bridge.ListenAddr)
 	}
+	if c.Agents.Enabled {
+		switch {
+		case c.Mode != "claude":
+			return fmt.Errorf("agents.enabled needs mode claude")
+		case c.Bridge.MainDirectory == "":
+			return fmt.Errorf("agents.enabled needs bridge.mainDirectory (or workspace): where sessions run")
+		case len(c.Bridge.KeepMain) > 0:
+			return fmt.Errorf("agents.enabled replaces bridge.keepMain: remove keepMain, the supervisor keeps the main running")
+		case c.Agents.MaxWorkers < 1:
+			return fmt.Errorf("agents.maxWorkers must be at least 1")
+		case !validPrefix(c.Agents.NamePrefix):
+			return fmt.Errorf("agents.namePrefix %q must be letters, digits and dashes", c.Agents.NamePrefix)
+		}
+		for name, f := range map[string]string{"agents.mainRole": c.Agents.MainRole, "agents.workerRole": c.Agents.WorkerRole} {
+			if st, err := os.Stat(f); err != nil || st.IsDir() {
+				return fmt.Errorf("%s %q is not a file", name, f)
+			}
+		}
+	}
 	for name, dir := range map[string]string{"workspace": c.Workspace, "bridge.mainDirectory": c.Bridge.MainDirectory} {
 		if dir == "" {
 			continue
@@ -228,6 +298,18 @@ func (c Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+func validPrefix(p string) bool {
+	if p == "" {
+		return false
+	}
+	for _, r := range p {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 // loopback reports whether addr binds only the local machine. An empty host

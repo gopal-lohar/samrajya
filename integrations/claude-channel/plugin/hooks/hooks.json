@@ -1,5 +1,5 @@
 {
-  "description": "Tell Samrajya when the main session hits its usage limit, so it can say so on Linear and wake the session once the limit resets",
+  "description": "Tell Samrajya when a session hits the usage limit (so it can say so and resume work once the limit resets), and when an agent's turns start and end (so it can tell a long step from a stuck session)",
   "hooks": {
     "StopFailure": [
       {
@@ -10,6 +10,30 @@
             "command": "node",
             "args": ["${CLAUDE_PLUGIN_ROOT}/server.mjs", "--stop-failure"],
             "timeout": 20
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/server.mjs", "--turn", "start"],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/server.mjs", "--turn", "end"],
+            "timeout": 10
           }
         ]
       }
