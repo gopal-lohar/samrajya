@@ -54,6 +54,44 @@ Either way, the session's role is [`../senapati/senapati.md`](../senapati/senapa
 own the outcome, do the work instead of routing it, never wait or poll, accept a
 ping before working on it, and reply in its thread.
 
+## Agents: several sessions at once
+
+With `agents.enabled: true` (mode claude), mahamantri runs the sessions
+itself instead of serving one main session you start. See
+[`../docs/design/agents.md`](../docs/design/agents.md) for the design.
+
+- **The main** talks to you (Remote Control, `agents.remoteControl`) and keeps
+  the overview. Its role is [`../senapati/main.md`](../senapati/main.md). It is
+  started without Edit and Write, so long work goes to workers
+  (`samrajya_dispatch`).
+- **Workers**: each Linear issue a trusted person pings gets a worker of its
+  own, with role [`../senapati/worker.md`](../senapati/worker.md). Follow-ups
+  on that issue, in any thread, go to the same worker. A worker acts only on
+  its own task and replies only on its own issue; the bridge enforces this.
+- **The supervisor** launches each agent as a `claude --bg` session in
+  `bridge.mainDirectory`, named `<namePrefix>-<agent>-g<generation>`. Each
+  session gets its agent id and a secret file through `--settings` env, and
+  its role through `--append-system-prompt-file`. The supervisor:
+  - runs at most `agents.maxWorkers` workers at once. The rest wait, and their
+    authors are told why;
+  - stops a worker that has nothing to do after 30 minutes, or after a minute
+    when other work is waiting for a slot;
+  - replaces a session that stops answering, fencing the old one out first;
+  - retries a launch that never attaches, and after three tries blocks the
+    task and says so on Linear;
+  - adopts sessions after a restart, and stops sessions with its prefix that
+    belong to no agent;
+  - launches nothing while the account is at its usage limit.
+- `agents.mainArgs` and `agents.workerArgs` are added to the launches, for
+  example `["--model", "sonnet"]`.
+
+Agents mode replaces `bridge.keepMain` and `restart-main.sh`. To switch, stop
+the main session you started yourself (`claude stop <id>`), enable agents, and
+restart mahamantri. To switch back, set `agents.enabled: false`, restart
+mahamantri and start the main session as before. The plugin must be 0.2.0 or
+later in the main directory (`claude plugin update samrajya@samrajya --scope
+local`, run there).
+
 ## Run
 
 ```sh

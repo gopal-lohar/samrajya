@@ -115,6 +115,22 @@ Remote Control requires Claude Code to talk to `api.anthropic.com` directly.
 Don't set `ANTHROPIC_BASE_URL` to a proxy for this session. Mid-turn, events
 wait until the turn ends; to stop or steer a turn at once, use Remote Control.
 
+## In agents mode
+
+When mahamantri runs with `agents.enabled`, it launches the sessions itself
+(see mahamantri's README). Each session's environment names its agent and
+secret file, and the plugin attaches as that agent and offers that role's
+tools:
+
+- the main gets `samrajya_dispatch`, `samrajya_agents`, `samrajya_message`
+  and `samrajya_stop_agent`;
+- a worker gets `samrajya_report` and messages only the main.
+
+A session without an agent id stays read-only: no session attaches by
+directory, and nothing takes over. A session that was replaced stops acting.
+The plugin's `UserPromptSubmit` and `Stop` hooks report each agent's turns, so
+mahamantri can tell a long step from a stuck or idle session.
+
 ## In opencode mode
 
 In `mode: opencode`, Mahamantri prompts the opencode main session with each

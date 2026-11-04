@@ -34,6 +34,20 @@ bridge:
   # Claude Code ends a background session after hours idle.
   keepMain: ["../integrations/claude-channel/restart-main.sh", "--ensure"]
 
+# Several sessions at once (mode claude): a main that talks to you and a
+# worker per Linear issue, launched and supervised by mahamantri. Replaces
+# bridge.keepMain. See ../docs/design/agents.md.
+agents:
+  enabled: false
+  maxWorkers: 2              # workers running at once; the rest wait
+  remoteControl: "Samrajya"  # the main session's Remote Control name
+  workerRemoteControl: false # Remote Control for each worker too
+  # mainArgs: ["--model", "sonnet"]
+  # workerArgs: []
+  # namePrefix: samrajya     # session names; strays with it are stopped
+  # mainRole: ../senapati/main.md
+  # workerRole: ../senapati/worker.md
+
 # mode: opencode only.
 opencode:
   serverURL: "http://localhost:4096"
