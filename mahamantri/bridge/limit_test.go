@@ -51,7 +51,7 @@ func TestALimitIsShownAndTheSessionWokenWhenItResets(t *testing.T) {
 	now = now.Add(20 * time.Minute)
 	c.do("GET", "/v1/status", nil) // keep the attachment fresh
 	s.mu.Lock()
-	s.lastSeen = now
+	s.atts[MainAgent].lastSeen = now
 	s.mu.Unlock()
 	s.nudge(context.Background(), 15*time.Minute)
 	if _, _, cm := fake.got(); len(cm) != 1 || !strings.Contains(cm[0], "usage limit until 7:10pm UTC") {
@@ -64,7 +64,7 @@ func TestALimitIsShownAndTheSessionWokenWhenItResets(t *testing.T) {
 	}
 	now = time.Date(2026, 11, 2, 19, 11, 0, 0, time.UTC)
 	s.mu.Lock()
-	s.lastSeen = now
+	s.atts[MainAgent].lastSeen = now
 	s.mu.Unlock()
 	s.wakeAfterLimit()
 	s.wakeAfterLimit() // once only
@@ -86,16 +86,27 @@ func TestALimitIsShownAndTheSessionWokenWhenItResets(t *testing.T) {
 	}
 }
 
-func TestTheSessionActingAgainEndsTheLimit(t *testing.T) {
+// A tool call right after the limit may come from a turn that began before
+// it, so only one well after it ends the limit (acceptance 13).
+func TestActingWellAfterTheLimitEndsIt(t *testing.T) {
 	s, _, c := linearServer(t)
+	now := time.Now()
+	s.now = func() time.Time { return now }
+	s.Store.now = s.now
 	c.attach(false)
 	c.do("POST", "/v1/limit", map[string]string{"message": "API Error: Rate limit reached"})
-	if until := s.limitedUntil(); until.IsZero() || until.Sub(time.Now()) > unknownLimit+time.Minute {
+	if until := s.limitedUntil(); until.IsZero() || until.Sub(now) > unknownLimit+time.Minute {
 		t.Fatalf("an unreadable limit: until %v", until)
 	}
+	now = now.Add(20 * time.Second)
 	c.do("POST", "/v1/tasks", NewTask{Title: "x"})
+	if s.limitedUntil().IsZero() {
+		t.Error("a call straight after the limit ended it")
+	}
+	now = now.Add(2 * time.Minute)
+	c.do("POST", "/v1/tasks", NewTask{Title: "y"})
 	if !s.limitedUntil().IsZero() {
-		t.Error("still limited after the session acted")
+		t.Error("still limited after the session acted again")
 	}
 }
 

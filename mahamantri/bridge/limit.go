@@ -76,6 +76,7 @@ func (s *Server) setLimited(until time.Time) {
 	v := ""
 	if !until.IsZero() {
 		v = until.Format(time.RFC3339)
+		s.Store.SetMeta(limitSetKey, s.now().Format(time.RFC3339))
 	}
 	if err := s.Store.SetMeta(limitKey, v); err != nil {
 		s.Logger.Printf("bridge: could not record the usage limit: %v", err)
@@ -87,8 +88,15 @@ func (s *Server) limit(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Message string `json:"message"`
 		Details string `json:"details"`
+		Agent   string `json:"agent"`
+		Secret  string `json:"secret"`
 	}
 	if !decode(w, r, &body) {
+		return
+	}
+	agent, known := s.hookAgent(body.Agent, body.Secret)
+	if !known {
+		writeErr(w, http.StatusForbidden, "unknown agent or stale secret")
 		return
 	}
 	until, ok := limitResets(body.Message+" "+body.Details, s.now())
@@ -96,7 +104,7 @@ func (s *Server) limit(w http.ResponseWriter, r *http.Request) {
 		until = s.now().Add(unknownLimit)
 	}
 	s.setLimited(until)
-	s.Logger.Printf("bridge: main session at its usage limit until %s (%q)", until.Format(time.RFC3339), truncate(body.Message, 120))
+	s.Logger.Printf("bridge: %s hit the usage limit; limited until %s (%q)", agent, until.Format(time.RFC3339), truncate(body.Message, 120))
 	writeJSON(w, http.StatusOK, map[string]any{"until": until})
 }
 
@@ -124,14 +132,13 @@ func (s *Server) wakeAfterLimit() {
 }
 
 // Notice stores a notice for the main session and wakes the feed.
-func (s *Server) Notice(id, kind, body string) error {
-	if err := s.Store.Notice(id, kind, body); err != nil {
+func (s *Server) Notice(id, kind, body string) error { return s.NoticeFor(MainAgent, id, kind, body) }
+
+// NoticeFor stores a notice for an agent and wakes the feeds.
+func (s *Server) NoticeFor(agent, id, kind, body string) error {
+	if err := s.Store.NoticeFor(agent, id, kind, body); err != nil {
 		return err
 	}
-	s.mu.Lock()
-	s.init()
-	close(s.wake)
-	s.wake = make(chan struct{})
-	s.mu.Unlock()
+	s.Wake()
 	return nil
 }

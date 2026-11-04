@@ -122,7 +122,7 @@ func TestOnlyTheAttachedSessionMayReadOrChangeState(t *testing.T) {
 
 	// A holder that went quiet can be replaced without takeover.
 	s.mu.Lock()
-	s.lastSeen = time.Now().Add(-2 * attachTTL)
+	s.atts[MainAgent].lastSeen = time.Now().Add(-2 * attachTTL)
 	s.mu.Unlock()
 	if main.attach(false) != http.StatusOK {
 		t.Error("could not attach after the holder went quiet")

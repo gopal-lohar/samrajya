@@ -47,19 +47,46 @@ type Server struct {
 	Linear   Linear
 	Received string
 
+	// Agents turns on agents mode (docs/design/agents.md): each session
+	// attaches as its agent, with the secret its launcher gave it, and
+	// nothing attaches by being first. Off, one session attaches as the main
+	// one, as before agents.
+	Agents bool
+	// Supervisor, in agents mode, stops agents for the main
+	// (samrajya_stop_agent).
+	Supervisor interface {
+		StopAgent(ctx context.Context, id string) error
+	}
+
 	mu       sync.Mutex
-	holder   string // attachment id
+	atts     map[string]*attachment // by agent id
+	seq      uint64                 // attachments made, for their ids
+	wake     chan struct{}          // closed and replaced whenever an event is stored
+	now      func() time.Time
+	brainMux *http.ServeMux
+}
+
+// attachment is one plugin instance attached as an agent.
+type attachment struct {
+	agent    string
+	holder   string // the attachment id the plugin sends back
+	secret   string // the agent secret it attached with (agents mode)
 	client   string
 	gen      uint64
 	lastSeen time.Time
-	wake     chan struct{} // closed and replaced whenever an event is stored
-	now      func() time.Time
-	brainMux *http.ServeMux
+	protocol int
+}
+
+func (a *attachment) live(now time.Time) bool {
+	return a != nil && now.Sub(a.lastSeen) < attachTTL
 }
 
 func (s *Server) init() {
 	if s.wake == nil {
 		s.wake = make(chan struct{})
+	}
+	if s.atts == nil {
+		s.atts = map[string]*attachment{}
 	}
 	if s.now == nil {
 		s.now = time.Now
@@ -87,11 +114,7 @@ func (s *Server) Ingest(p linear.Ping, delivery string) error {
 	if err != nil {
 		return err
 	}
-	s.mu.Lock()
-	s.init()
-	close(s.wake)
-	s.wake = make(chan struct{})
-	s.mu.Unlock()
+	s.Wake()
 	if created && s.Linear != nil && s.Received != "" && p.CommentID != "" {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -104,17 +127,31 @@ func (s *Server) Ingest(p linear.Ping, delivery string) error {
 	return nil
 }
 
-// Attachment describes who is attached, for status.
+// Wake ends every waiting feed request, after an event is stored.
+func (s *Server) Wake() {
+	s.mu.Lock()
+	s.init()
+	close(s.wake)
+	s.wake = make(chan struct{})
+	s.mu.Unlock()
+}
+
+// Attachment describes who is attached as an agent, for status.
 type Attachment struct {
+	Agent      string    `json:"agent"`
 	Client     string    `json:"client,omitempty"`
 	Generation uint64    `json:"generation"`
 	LastSeen   time.Time `json:"lastSeen,omitempty"`
 	Live       bool      `json:"live"`
 }
 
-func (s *Server) attachment() Attachment {
-	return Attachment{Client: s.client, Generation: s.gen, LastSeen: s.lastSeen,
-		Live: s.holder != "" && s.now().Sub(s.lastSeen) < attachTTL}
+// attachmentOf describes agent's attachment; call with s.mu held.
+func (s *Server) attachmentOf(agent string) Attachment {
+	a := s.atts[agent]
+	if a == nil {
+		return Attachment{Agent: agent}
+	}
+	return Attachment{Agent: agent, Client: a.client, Generation: a.gen, LastSeen: a.lastSeen, Live: a.live(s.now())}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -141,7 +178,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case r.Method == http.MethodGet:
 			s.brainMux.ServeHTTP(w, r)
 		default:
-			s.withHolder(w, r, s.brainMux.ServeHTTP)
+			s.withAgent(w, r, func(w http.ResponseWriter, r *http.Request, _ string) { s.brainMux.ServeHTTP(w, r) })
 		}
 		return
 	}
@@ -149,47 +186,66 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPost && path == "/v1/attach":
 		s.attach(w, r)
 	case r.Method == http.MethodPost && path == "/v1/detach":
-		s.withHolder(w, r, s.detach)
+		s.withAgent(w, r, s.detach)
 	case r.Method == http.MethodGet && path == "/v1/status":
-		s.status(w)
+		s.status(w, r)
 	case r.Method == http.MethodGet && path == "/v1/events":
-		s.withHolder(w, r, s.events)
+		s.withAgent(w, r, s.events)
 	case r.Method == http.MethodGet && path == "/v1/tasks":
 		s.tasks(w, r)
 	case r.Method == http.MethodGet && strings.HasPrefix(path, "/v1/tasks/"):
 		t, err := s.Store.Task(strings.TrimPrefix(path, "/v1/tasks/"))
 		reply(w, t, err)
 	case r.Method == http.MethodPost && path == "/v1/accept":
-		s.withHolder(w, r, s.accept)
+		s.withAgent(w, r, s.accept)
 	case r.Method == http.MethodPost && path == "/v1/tasks":
-		s.withHolder(w, r, s.createTask)
+		s.withAgent(w, r, mainOnly(s.createTask))
 	case r.Method == http.MethodPost && strings.HasPrefix(path, "/v1/tasks/"):
-		s.withHolder(w, r, func(w http.ResponseWriter, r *http.Request) {
+		s.withAgent(w, r, func(w http.ResponseWriter, r *http.Request, agent string) {
 			var u TaskUpdate
 			if decode(w, r, &u) {
-				t, err := s.Store.UpdateTask(strings.TrimPrefix(path, "/v1/tasks/"), u)
+				t, err := s.Store.UpdateTaskAs(agent, strings.TrimPrefix(path, "/v1/tasks/"), u)
 				reply(w, t, err)
 			}
 		})
 	case r.Method == http.MethodPost && path == "/v1/limit":
 		s.limit(w, r)
+	case r.Method == http.MethodPost && path == "/v1/turn":
+		s.turn(w, r)
 	case r.Method == http.MethodPost && path == "/v1/reply":
-		s.withHolder(w, r, s.reply)
+		s.withAgent(w, r, s.reply)
+	case r.Method == http.MethodGet && path == "/v1/agents":
+		s.agents(w)
+	case r.Method == http.MethodPost && path == "/v1/dispatch":
+		s.withAgent(w, r, mainOnly(s.dispatch))
+	case r.Method == http.MethodPost && path == "/v1/message":
+		s.withAgent(w, r, s.message)
+	case r.Method == http.MethodPost && path == "/v1/report":
+		s.withAgent(w, r, s.report)
+	case r.Method == http.MethodPost && strings.HasPrefix(path, "/v1/agents/") && strings.HasSuffix(path, "/stop"):
+		s.withAgent(w, r, mainOnly(func(w http.ResponseWriter, r *http.Request, _ string) {
+			id := strings.TrimSuffix(strings.TrimPrefix(path, "/v1/agents/"), "/stop")
+			if s.Supervisor == nil {
+				writeErr(w, http.StatusNotImplemented, "agents mode is off")
+				return
+			}
+			reply(w, map[string]any{"stopped": id}, s.Supervisor.StopAgent(r.Context(), id))
+		}))
 	case r.Method == http.MethodPost && path == "/v1/actions":
-		s.withHolder(w, r, func(w http.ResponseWriter, r *http.Request) {
+		s.withAgent(w, r, func(w http.ResponseWriter, r *http.Request, agent string) {
 			var a Action
 			if decode(w, r, &a) {
-				a, err := s.Store.Intend(Action{TaskID: a.TaskID, Kind: a.Kind, Target: a.Target, Intent: a.Intent})
+				a, err := s.Store.IntendAs(agent, Action{TaskID: a.TaskID, Kind: a.Kind, Target: a.Target, Intent: a.Intent})
 				reply(w, a, err)
 			}
 		})
 	case r.Method == http.MethodPost && strings.HasPrefix(path, "/v1/actions/"):
-		s.withHolder(w, r, func(w http.ResponseWriter, r *http.Request) {
+		s.withAgent(w, r, func(w http.ResponseWriter, r *http.Request, agent string) {
 			var body struct {
 				Status, Ref, Note, ThreadID, Issue string
 			}
 			if decode(w, r, &body) {
-				a, err := s.Store.Resolve(strings.TrimPrefix(path, "/v1/actions/"), body.Status, body.Ref, body.Note, body.ThreadID, body.Issue)
+				a, err := s.Store.ResolveAs(agent, strings.TrimPrefix(path, "/v1/actions/"), body.Status, body.Ref, body.Note, body.ThreadID, body.Issue)
 				reply(w, a, err)
 			}
 		})
@@ -198,62 +254,142 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// attach makes the caller the attached plugin instance: when nobody is, when
-// the holder has gone quiet, or with takeover - which a main session does
-// only when the person says this session is now the main one.
+type agentHandler func(w http.ResponseWriter, r *http.Request, agent string)
+
+func mainOnly(next agentHandler) agentHandler {
+	return func(w http.ResponseWriter, r *http.Request, agent string) {
+		if agent != MainAgent {
+			writeErr(w, http.StatusForbidden, "only the main session may do this")
+			return
+		}
+		next(w, r, agent)
+	}
+}
+
+// ProtocolVersion is the plugin protocol this mahamantri serves. A plugin
+// that sends none is from before agents and is served in legacy mode only.
+const ProtocolVersion = 2
+
+// attach attaches the caller as an agent.
+//
+// Agents mode: the caller names its agent and gives the secret of the
+// agent's current launch; anything else is refused (and stays read-only). A
+// launch's secret is replaced on the next launch, so a replaced session can
+// no longer attach or act. The agent's earlier attachment, if any, is
+// replaced: it is the same session reconnecting.
+//
+// Legacy mode: the caller becomes the main session when nobody is attached,
+// when the holder has gone quiet, or with takeover - which a session does
+// only when the person says this one is now the main.
 func (s *Server) attach(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Client   string `json:"client"`
 		Takeover bool   `json:"takeover"`
+		Agent    string `json:"agent"`
+		Secret   string `json:"secret"`
+		Protocol int    `json:"protocol"`
 	}
 	if !decode(w, r, &body) {
 		return
 	}
+	agent, secret := MainAgent, ""
+	if s.Agents {
+		if body.Agent == "" || body.Secret == "" {
+			writeErr(w, http.StatusConflict, "this session is not one of Samrajya's agents (no agent id), so it is read-only")
+			return
+		}
+		if body.Protocol != ProtocolVersion {
+			writeErr(w, http.StatusUpgradeRequired, fmt.Sprintf("plugin protocol %d; this mahamantri serves %d - update the plugin", body.Protocol, ProtocolVersion))
+			return
+		}
+		a, err := s.Store.Agent(body.Agent)
+		if err != nil || a.Secret == "" || subtle.ConstantTimeCompare([]byte(a.Secret), []byte(body.Secret)) != 1 {
+			writeErr(w, http.StatusForbidden, "unknown agent or stale secret: this session has been replaced or stopped")
+			return
+		}
+		agent, secret = a.ID, a.Secret
+	} else if body.Agent != "" && body.Agent != MainAgent {
+		writeErr(w, http.StatusConflict, "agents mode is off: only the main session attaches")
+		return
+	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if a := s.attachment(); a.Live && !body.Takeover {
+	s.init()
+	if cur := s.atts[agent]; !s.Agents && cur.live(s.now()) && !body.Takeover {
+		a := s.attachmentOf(agent)
+		s.mu.Unlock()
 		writeJSON(w, http.StatusConflict, map[string]any{
 			"error":    "another session is attached as the main session; take over only if the person says this one is now the main",
 			"attached": a,
 		})
 		return
 	}
-	s.gen++
-	s.holder = fmt.Sprintf("%d-%d", s.gen, s.now().UnixNano())
-	s.client = body.Client
-	s.lastSeen = s.now()
-	s.Logger.Printf("bridge: %q attached (generation %d, takeover %v)", body.Client, s.gen, body.Takeover)
-	writeJSON(w, http.StatusOK, map[string]any{"attachment": s.holder, "generation": s.gen})
+	s.seq++
+	att := &attachment{agent: agent, secret: secret, client: body.Client, gen: s.seq, lastSeen: s.now(), protocol: body.Protocol,
+		holder: fmt.Sprintf("%s-%d-%d", agent, s.seq, s.now().UnixNano())}
+	s.atts[agent] = att
+	s.mu.Unlock()
+	if s.Agents {
+		s.Store.UpdateAgent(agent, func(a *Agent) error {
+			if a.Secret == secret {
+				a.State, a.AttachedAt, a.Failures, a.Error = AgentLive, s.now(), 0, ""
+			}
+			return nil
+		})
+	}
+	s.Logger.Printf("bridge: %q attached as %s (attachment %d, takeover %v)", body.Client, agent, att.gen, body.Takeover)
+	writeJSON(w, http.StatusOK, map[string]any{"attachment": att.holder, "generation": att.gen, "agent": agent})
 }
 
-// detach releases the attachment, so the next session attaches at once
-// rather than after attachTTL. The plugin calls it when its session ends.
-func (s *Server) detach(w http.ResponseWriter, r *http.Request) {
+// detach releases the caller's attachment, so its successor attaches at
+// once rather than after attachTTL. The plugin calls it when its session
+// ends.
+func (s *Server) detach(w http.ResponseWriter, r *http.Request, agent string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.Logger.Printf("bridge: %q detached (generation %d)", s.client, s.gen)
-	s.holder, s.client = "", ""
+	if a := s.atts[agent]; a != nil && a.holder == r.Header.Get("X-Samrajya-Attachment") {
+		delete(s.atts, agent)
+	}
+	s.mu.Unlock()
+	s.Logger.Printf("bridge: %s detached", agent)
 	writeJSON(w, http.StatusOK, map[string]any{"detached": true})
 }
 
-func (s *Server) withHolder(w http.ResponseWriter, r *http.Request, next http.HandlerFunc) {
+// withAgent runs next for the agent the request's attachment belongs to,
+// refusing a request without one, and in agents mode one whose launch has
+// since been replaced.
+func (s *Server) withAgent(w http.ResponseWriter, r *http.Request, next agentHandler) {
 	id := r.Header.Get("X-Samrajya-Attachment")
 	s.mu.Lock()
-	ok := id != "" && id == s.holder
-	if ok {
-		s.lastSeen = s.now()
+	s.init()
+	var att *attachment
+	for _, a := range s.atts {
+		if id != "" && a.holder == id {
+			att = a
+		}
 	}
-	a := s.attachment()
+	if att != nil {
+		att.lastSeen = s.now()
+	}
+	main := s.attachmentOf(MainAgent)
 	s.mu.Unlock()
-	if ok && r.Method == http.MethodPost && !s.limitedUntil().IsZero() {
-		// The session is calling tools, so its turns run again.
-		s.setLimited(time.Time{})
+	if att != nil && s.Agents {
+		if a, err := s.Store.Agent(att.agent); err != nil || a.Secret != att.secret {
+			s.mu.Lock()
+			if s.atts[att.agent] == att {
+				delete(s.atts, att.agent)
+			}
+			s.mu.Unlock()
+			att = nil
+		}
 	}
-	if !ok {
-		writeJSON(w, http.StatusConflict, map[string]any{"error": "this session is not attached as the main session", "attached": a})
+	if att == nil {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "this session is not attached as one of Samrajya's agents", "attached": main})
 		return
 	}
-	next(w, r)
+	if r.Method == http.MethodPost {
+		// The session is calling tools, so turns run again.
+		s.clearLimitOnActivity()
+	}
+	next(w, r, att.agent)
 }
 
 // reply posts a comment as Senapati for the main session, journaled: the
@@ -262,7 +398,7 @@ func (s *Server) withHolder(w http.ResponseWriter, r *http.Request, next http.Ha
 // uncertain rather than forgotten. A comment posted this way, rather than
 // through the session's Linear connector, is Senapati's whoever the
 // connector belongs to.
-func (s *Server) reply(w http.ResponseWriter, r *http.Request) {
+func (s *Server) reply(w http.ResponseWriter, r *http.Request, agent string) {
 	var body struct {
 		TaskID   string `json:"taskId"`
 		Issue    string `json:"issue"`
@@ -276,7 +412,19 @@ func (s *Server) reply(w http.ResponseWriter, r *http.Request) {
 	case s.Linear == nil:
 		writeErr(w, http.StatusNotImplemented, "mahamantri has no Linear API key (linear.apiKey), so it cannot post")
 		return
-	case body.Issue == "" || strings.TrimSpace(body.Body) == "":
+	}
+	task, err := s.Store.MayReply(agent, body.Issue)
+	if err != nil {
+		reply(w, nil, err)
+		return
+	}
+	if body.Issue == "" {
+		body.Issue = task.Issue // a worker's own issue
+	}
+	if body.TaskID == "" {
+		body.TaskID = task.ID
+	}
+	if body.Issue == "" || strings.TrimSpace(body.Body) == "" {
 		writeErr(w, http.StatusBadRequest, "issue and body are required")
 		return
 	}
@@ -284,7 +432,7 @@ func (s *Server) reply(w http.ResponseWriter, r *http.Request) {
 	if body.ThreadID != "" {
 		target += " thread " + body.ThreadID
 	}
-	a, err := s.Store.Intend(Action{TaskID: body.TaskID, Kind: "linear_comment", Target: target, Intent: truncate(body.Body, 200)})
+	a, err := s.Store.IntendAs(agent, Action{TaskID: body.TaskID, Kind: "linear_comment", Target: target, Intent: truncate(body.Body, 200)})
 	if err != nil {
 		reply(w, nil, err)
 		return
@@ -332,11 +480,14 @@ func (s *Server) currentStatus() Status {
 }
 
 // Live reports whether a main session is attached and has been heard from.
-func (s *Server) Live() bool {
+func (s *Server) Live() bool { return s.AgentLive(MainAgent) }
+
+// AgentLive reports whether agent is attached and has been heard from.
+func (s *Server) AgentLive(agent string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.init()
-	return s.attachment().Live
+	return s.atts[agent].live(s.now())
 }
 
 // Watch runs until ctx ends, checking every interval: it wakes the main
@@ -425,16 +576,32 @@ func (s *Server) nudge(ctx context.Context, after time.Duration) {
 	}
 }
 
-func (s *Server) status(w http.ResponseWriter) {
-	rec, err := s.Store.Recovery()
+// status is what an agent needs after a restart or compaction: its own
+// pending events, open tasks and unresolved actions (everyone's for the
+// main and for a caller that is not attached), and who is attached.
+func (s *Server) status(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	s.init()
+	var me string
+	for _, a := range s.atts {
+		if h := r.Header.Get("X-Samrajya-Attachment"); h != "" && a.holder == h {
+			me = a.agent
+		}
+	}
+	main := s.attachmentOf(MainAgent)
+	s.mu.Unlock()
+	var rec Recovery
+	var err error
+	if me != "" && me != MainAgent {
+		rec, err = s.Store.AgentRecovery(me)
+	} else {
+		rec, err = s.Store.Recovery()
+	}
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.mu.Lock()
-	a := s.attachment()
-	s.mu.Unlock()
-	out := map[string]any{"attached": a, "recovery": rec}
+	out := map[string]any{"attached": main, "you": me, "agentsMode": s.Agents, "recovery": rec}
 	if s.Brain != nil {
 		out["brainIndex"] = s.Brain.Index()
 	}
@@ -445,6 +612,11 @@ func (s *Server) status(w http.ResponseWriter) {
 // one to arrive. The wake channel is taken before the store is read, so an
 // event stored in between still ends the wait.
 func (s *Server) WaitPending(ctx context.Context, after uint64, wait time.Duration) ([]Event, error) {
+	return s.WaitPendingFor(ctx, "", after, wait)
+}
+
+// WaitPendingFor is WaitPending for one agent's events ("" for everyone's).
+func (s *Server) WaitPendingFor(ctx context.Context, agent string, after uint64, wait time.Duration) ([]Event, error) {
 	s.mu.Lock()
 	s.init()
 	s.mu.Unlock()
@@ -454,7 +626,7 @@ func (s *Server) WaitPending(ctx context.Context, after uint64, wait time.Durati
 		s.mu.Lock()
 		wake := s.wake
 		s.mu.Unlock()
-		pending, err := s.Store.Pending(after)
+		pending, err := s.Store.PendingFor(agent, after)
 		if err != nil || len(pending) > 0 || wait <= 0 {
 			return pending, err
 		}
@@ -469,10 +641,16 @@ func (s *Server) WaitPending(ctx context.Context, after uint64, wait time.Durati
 }
 
 // events long-polls for pending events after a sequence number.
-func (s *Server) events(w http.ResponseWriter, r *http.Request) {
+func (s *Server) events(w http.ResponseWriter, r *http.Request, agent string) {
 	after, _ := strconv.ParseUint(r.URL.Query().Get("after"), 10, 64)
 	wait, _ := time.ParseDuration(r.URL.Query().Get("wait") + "s")
-	pending, err := s.WaitPending(r.Context(), after, min(wait, maxWait))
+	if s.Agents {
+		// Events the launch brief carried are not sent again.
+		if a, err := s.Store.Agent(agent); err == nil {
+			after = max(after, a.BriefSeq)
+		}
+	}
+	pending, err := s.WaitPendingFor(r.Context(), agent, after, min(wait, maxWait))
 	switch {
 	case r.Context().Err() != nil:
 	case err != nil:
@@ -487,7 +665,7 @@ func (s *Server) tasks(w http.ResponseWriter, r *http.Request) {
 	reply(w, map[string]any{"tasks": nonNil(t)}, err)
 }
 
-func (s *Server) accept(w http.ResponseWriter, r *http.Request) {
+func (s *Server) accept(w http.ResponseWriter, r *http.Request, agent string) {
 	var body struct {
 		Events     []string `json:"events"`
 		TaskID     string   `json:"taskId"`
@@ -495,12 +673,12 @@ func (s *Server) accept(w http.ResponseWriter, r *http.Request) {
 		NextAction string   `json:"nextAction"`
 	}
 	if decode(w, r, &body) {
-		t, err := s.Store.Accept(body.Events, body.TaskID, body.NewTask, body.NextAction)
+		t, err := s.Store.AcceptAs(agent, body.Events, body.TaskID, body.NewTask, body.NextAction)
 		reply(w, t, err)
 	}
 }
 
-func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
+func (s *Server) createTask(w http.ResponseWriter, r *http.Request, _ string) {
 	var n NewTask
 	if decode(w, r, &n) {
 		t, err := s.Store.CreateTask(n)
@@ -522,6 +700,8 @@ func reply(w http.ResponseWriter, v any, err error) {
 	switch {
 	case errors.Is(err, ErrNotFound):
 		writeErr(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, ErrForbidden):
+		writeErr(w, http.StatusForbidden, err.Error())
 	case err != nil:
 		writeErr(w, http.StatusBadRequest, err.Error())
 	default:
