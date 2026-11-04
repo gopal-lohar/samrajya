@@ -3,8 +3,8 @@ package bridge
 import (
 	"net/http"
 	"strings"
-	"time"
 	"testing"
+	"time"
 )
 
 func agentsServer(t *testing.T) (*Server, string, *fakeLinear) {
