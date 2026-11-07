@@ -17,7 +17,9 @@ import (
 
 // claudeLauncher runs agents as Claude Code background sessions
 // (claude --bg) in the main directory, where the Samrajya plugin is
-// installed. Each session learns its agent id, the path of its secret file
+// installed: its MCP server attaches the session as its agent, and its
+// hooks hand it new messages between turns (no --channels, which an
+// account's policy may switch off). Each session learns its agent id, the path of its secret file
 // and the bridge's discovery file through --settings env, which reaches the
 // plugin's process and its hooks, and its role through
 // --append-system-prompt-file, which outranks Claude Code's defaults.
@@ -26,7 +28,6 @@ type claudeLauncher struct {
 	dir        string // where sessions run
 	discovery  string
 	stateDir   string
-	channel    string
 	mainRole   string
 	workerRole string
 	mainArgs   []string
@@ -65,7 +66,7 @@ func (l *claudeLauncher) Launch(ctx context.Context, a bridge.Agent, brief strin
 	}
 	argv := []string{l.command, "--bg", "-n", a.Name, "--settings", string(settings),
 		"--append-system-prompt-file", role, "--dangerously-skip-permissions",
-		"--channels", l.channel, "--disallowedTools"}
+		"--disallowedTools"}
 	argv = append(argv, withheld...)
 	if rc := l.remoteName(a); rc != "" {
 		argv = append(argv, "--remote-control", rc)

@@ -152,8 +152,6 @@ type Config struct {
 		// StateDir holds each agent's secret file and files fetched for
 		// agents (default next to the discovery file).
 		StateDir string `yaml:"stateDir"`
-		// Channel is the channel plugin sessions load.
-		Channel string `yaml:"channel"`
 	} `yaml:"agents"`
 }
 
@@ -251,9 +249,6 @@ func Load(path string) (Config, error) {
 	}
 	if c.Agents.StateDir == "" {
 		c.Agents.StateDir = filepath.Join(filepath.Dir(c.Bridge.DiscoveryFile), "agents")
-	}
-	if c.Agents.Channel == "" {
-		c.Agents.Channel = "plugin:samrajya@samrajya"
 	}
 	paths := []*string{&c.Workspace, &c.Brain, &c.Bridge.Store, &c.Bridge.DiscoveryFile, &c.Bridge.MainDirectory, &c.Opencode.InstructionsFile,
 		&c.Agents.MainRole, &c.Agents.WorkerRole, &c.Agents.StateDir}

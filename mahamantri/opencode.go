@@ -147,17 +147,5 @@ func (o *opencodeMain) prompt(ctx context.Context, e bridge.Event) error {
 	return err
 }
 
-// renderPrompt is an event as the main session reads it: a prompt has no
-// metadata the model sees, so how to accept and answer it is spelled out.
-func renderPrompt(e bridge.Event) string {
-	text := bridge.RenderEvent(e)
-	if e.Source == "samrajya" {
-		return text + fmt.Sprintf("\nAcknowledge it with samrajya_accept (event_id %s); it needs no task.", e.ID)
-	}
-	thread := e.ThreadID
-	if thread == "" {
-		thread = "(none)"
-	}
-	return text + fmt.Sprintf("\nAccept it with samrajya_accept (event_id %s) before working on it; answer with samrajya_reply in conversation %s, thread %s.",
-		e.ID, e.Conversation, thread)
-}
+// renderPrompt is an event as the main session reads it.
+func renderPrompt(e bridge.Event) string { return bridge.RenderForAgent(e) }

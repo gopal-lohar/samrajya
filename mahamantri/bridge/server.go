@@ -58,12 +58,15 @@ type Server struct {
 		Queued(agent string) (ahead int, queued bool)
 	}
 
-	mu       sync.Mutex
-	atts     map[string]*attachment // by agent id
-	seq      uint64                 // attachments made, for their ids
-	wake     chan struct{}          // closed and replaced whenever an event is stored
-	now      func() time.Time
-	brainMux *http.ServeMux
+	mu      sync.Mutex
+	atts    map[string]*attachment // by agent id
+	waiters map[string]*waiter     // each agent's open /v1/wait, by agent id
+	// lastWaiter is when each agent's last waiter ended.
+	lastWaiter map[string]time.Time
+	seq        uint64        // attachments made, for their ids
+	wake       chan struct{} // closed and replaced whenever an event is stored
+	now        func() time.Time
+	brainMux   *http.ServeMux
 }
 
 // attachment is one plugin instance attached as an agent.
@@ -87,6 +90,9 @@ func (s *Server) init() {
 	}
 	if s.atts == nil {
 		s.atts = map[string]*attachment{}
+	}
+	if s.waiters == nil {
+		s.waiters, s.lastWaiter = map[string]*waiter{}, map[string]time.Time{}
 	}
 	if s.now == nil {
 		s.now = time.Now
@@ -196,6 +202,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 	case r.Method == http.MethodPost && path == "/v1/limit":
 		s.limit(w, r)
+	case r.Method == http.MethodPost && path == "/v1/wait":
+		s.wait(w, r)
 	case r.Method == http.MethodPost && path == "/v1/turn":
 		s.turn(w, r)
 	case r.Method == http.MethodPost && path == "/v1/reply":

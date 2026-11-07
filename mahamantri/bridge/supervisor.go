@@ -183,6 +183,14 @@ func (sv *Supervisor) check(ctx context.Context, a Agent, byName map[string]Sess
 			sv.retire(ctx, a, byName, "lost contact")
 			return
 		}
+		if sv.deaf(a) {
+			// Its waiter is gone (the hook failed, or Claude Code ended it),
+			// so it would never hear of what waits for it: relaunch it, with
+			// those events in its brief.
+			sv.Logger.Printf("supervisor: %s (%s) has events waiting and no waiter; relaunching it", a.ID, a.Name)
+			sv.retire(ctx, a, byName, "it stopped listening for new events")
+			return
+		}
 		if a.InTurn && sv.stuck(a) && !a.StuckNoted.Equal(a.TurnAt) {
 			sv.update(a, func(x *Agent) { x.StuckNoted = a.TurnAt })
 			if a.ID == MainAgent {
@@ -213,6 +221,20 @@ func (sv *Supervisor) check(ctx context.Context, a Agent, byName map[string]Sess
 			sv.update(a, func(x *Agent) { x.State, x.Failures, x.RetryAt = AgentIdle, 0, time.Time{} })
 		}
 	}
+}
+
+// deafAfter is how long an event may wait, undelivered, for a session that
+// is between turns and has no waiter, before the session is relaunched.
+const deafAfter = 90 * time.Second
+
+// deaf: the agent is between turns, has had no waiter for a while, and an
+// event has waited deafAfter to be handed to it.
+func (sv *Supervisor) deaf(a Agent) bool {
+	if a.InTurn || sv.Server.Listening(a.ID) || sv.now().Sub(a.TurnAt) < deafAfter {
+		return false
+	}
+	p, _ := sv.Store.PendingFor(a.ID, max(a.DeliveredSeq, a.BriefSeq))
+	return len(p) > 0 && sv.now().Sub(p[0].ReceivedAt) > deafAfter
 }
 
 // stuck: a worker's turn has run StuckAfter. The main's has run

@@ -16,7 +16,7 @@ func TestClaudeLauncherStartsABackgroundSessionAsTheAgent(t *testing.T) {
 	var got []string
 	var ranIn string
 	l := &claudeLauncher{command: "claude", dir: dir, discovery: "/state/bridge.json", stateDir: filepath.Join(dir, "agents"),
-		channel: "plugin:samrajya@samrajya", mainRole: "/roles/main.md", workerRole: "/roles/worker.md",
+		mainRole: "/roles/main.md", workerRole: "/roles/worker.md",
 		workerArgs: []string{"--model", "sonnet"}, remote: "Samrajya",
 		run: func(_ context.Context, argv []string, d string) ([]byte, error) {
 			got, ranIn = argv, d
@@ -41,7 +41,7 @@ func TestClaudeLauncherStartsABackgroundSessionAsTheAgent(t *testing.T) {
 		return got[i+1]
 	}
 	if got[1] != "--bg" || at("-n") != "samrajya-w-T3-g2" || at("--append-system-prompt-file") != "/roles/worker.md" ||
-		at("--channels") != "plugin:samrajya@samrajya" || at("--model") != "sonnet" || got[len(got)-1] != "do T3" || got[len(got)-2] != "--" {
+		slices.Contains(got, "--channels") || at("--model") != "sonnet" || got[len(got)-1] != "do T3" || got[len(got)-2] != "--" {
 		t.Errorf("argv %q", got)
 	}
 	var settings struct{ Env map[string]string }

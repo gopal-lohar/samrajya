@@ -67,6 +67,9 @@ type Agent struct {
 	// BriefSeq: events up to this sequence were given in the launch brief,
 	// so the feed does not send them again.
 	BriefSeq uint64 `json:"briefSeq,omitempty"`
+	// DeliveredSeq: events up to this sequence were handed to the session
+	// (by its brief or its waiter), so they are not handed over again.
+	DeliveredSeq uint64 `json:"deliveredSeq,omitempty"`
 
 	CreatedAt  time.Time `json:"createdAt"`
 	LaunchedAt time.Time `json:"launchedAt,omitempty"`
@@ -179,6 +182,7 @@ func (s *Store) Launching(id, prefix string) (Agent, error) {
 			return err
 		}
 		a.Gen++
+		a.DeliveredSeq = a.BriefSeq
 		a.Secret, a.State, a.Session, a.Error = secret, AgentStarting, "", ""
 		a.Name = fmt.Sprintf("%s-%s-g%d", prefix, a.ID, a.Gen)
 		a.LaunchedAt, a.AttachedAt, a.InTurn, a.TurnAt = s.now(), time.Time{}, false, time.Time{}

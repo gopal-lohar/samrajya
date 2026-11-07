@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { agentFromEnv, Bridge } from './bridge.js';
 import { createChannel } from './channel.js';
-import { reportStopFailure, reportTurn } from './hook.js';
+import { reportStopFailure, reportTurn, waitForEvents } from './hook.js';
 
 // Same default as mahamantri's bridge.discoveryFile.
 const discoveryPath = process.env.SAMRAJYA_BRIDGE_FILE ||
@@ -32,6 +32,18 @@ if (process.argv[2] === '--turn') {
     // The supervisor copes with a missed turn report.
   }
   process.exit(0);
+}
+
+if (process.argv[2] === '--wait') {
+  // The waiter (an asyncRewake hook): exit 2 with the new messages to wake
+  // the session with them.
+  process.stdin.resume().on('error', () => {});
+  // The turn that just ended, first: a hand-over below starts the next.
+  await reportTurn('end', new Bridge(discoveryPath), agent).catch(() => {});
+  const code = await waitForEvents(new Bridge(discoveryPath), agent, (text) => {
+    process.stderr.write(`Samrajya: new messages for you.\n\n${text}\n`);
+  });
+  process.exit(code);
 }
 
 const channel = createChannel({ discoveryPath, agent });

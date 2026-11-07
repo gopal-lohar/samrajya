@@ -132,7 +132,7 @@ func run(configPath string) error {
 		sv = &bridge.Supervisor{Store: store, Server: srv, Logger: logger, Prefix: cfg.Agents.NamePrefix, MaxWorkers: cfg.Agents.MaxWorkers,
 			Launcher: &claudeLauncher{
 				command: cfg.Agents.Command, dir: cfg.Bridge.MainDirectory, discovery: cfg.Bridge.DiscoveryFile,
-				stateDir: cfg.Agents.StateDir, channel: cfg.Agents.Channel,
+				stateDir: cfg.Agents.StateDir,
 				mainRole: cfg.Agents.MainRole, workerRole: cfg.Agents.WorkerRole,
 				mainArgs: cfg.Agents.MainArgs, workerArgs: cfg.Agents.WorkerArgs,
 				remote: cfg.Agents.RemoteControl, workerRC: cfg.Agents.WorkerRemote,
