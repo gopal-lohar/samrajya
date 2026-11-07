@@ -28,6 +28,7 @@ unit() {
   local exec dir
   exec=$(systemctl --user show -p ExecStart --value "$service" | sed -n 's/.*argv\[\]=\([^;]*\);.*/\1/p')
   dir=$(systemctl --user show -p WorkingDirectory --value "$service")
+  exec=$(sed 's/[[:space:]]*$//' <<<"$exec")
   [[ -n $exec ]] || die "no service $service (systemctl --user cat $service)"
   bin=${exec%% *}
   cfg=${exec#* }
