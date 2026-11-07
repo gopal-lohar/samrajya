@@ -186,16 +186,31 @@ func (l *claudeLauncher) Running(ctx context.Context) ([]bridge.Session, error) 
 	return out, nil
 }
 
-// runIn runs argv in dir with Claude Code's install directory on PATH.
+// runIn runs argv in dir. Under systemd it runs it in a scope of its own:
+// the first claude command starts Claude Code's background daemon, which
+// hosts every session, and in the service's own control group a restart of
+// mahamantri would kill them all.
 func runIn(ctx context.Context, argv []string, dir string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
+	argv = outsideService(argv, os.Getenv("INVOCATION_ID") != "", exec.LookPath)
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = dir
-	if home, err := os.UserHomeDir(); err == nil {
-		cmd.Env = append(os.Environ(), "PATH="+filepath.Join(home, ".local", "bin")+string(os.PathListSeparator)+os.Getenv("PATH"))
-	}
 	return cmd.CombinedOutput()
+}
+
+// outsideService wraps argv in a transient systemd user scope when running
+// as a systemd service (and systemd-run is there), so what it starts
+// outlives the service.
+func outsideService(argv []string, underSystemd bool, lookPath func(string) (string, error)) []string {
+	if !underSystemd {
+		return argv
+	}
+	run, err := lookPath("systemd-run")
+	if err != nil {
+		return argv
+	}
+	return append([]string{run, "--user", "--scope", "--quiet", "--collect", "--"}, argv...)
 }
 
 // writeSecret writes an agent's secret where only this user can read it.
