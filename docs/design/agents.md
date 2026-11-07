@@ -1,6 +1,10 @@
 # Agents: many sessions working at once
 
-Status: accepted; being built behind `agents.enabled` (off by default).
+Status: built; agents mode is now the only mode. [surfaces.md](surfaces.md)
+replaces three parts of this design:
+- routing is by conversation on any surface, not by Linear issue;
+- sessions are woken by a waiter hook, not channels;
+- the single-session mode and `agents.enabled` are gone.
 
 ## Why
 

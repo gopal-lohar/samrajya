@@ -1,131 +1,138 @@
 # mahamantri
 
-The bridge between Linear and Samrajya's main assistant: one hands-on agent
-session that does the work itself. Mahamantri keeps what must outlive any one
-session and serves it to the session over a local, authenticated API:
+Samrajya's core. It takes messages from every surface into a durable inbox
+and routes each to the session that owns its work. It runs those sessions
+and supervises them, and it serves them a local, authenticated API for their
+tasks, replies, journal and memory. The design is in
+[`../docs/design/agents.md`](../docs/design/agents.md) and
+[`../docs/design/surfaces.md`](../docs/design/surfaces.md).
 
-- **Durable Linear ingress.** A ping is a comment that @-mentions Senapati
-  (the bot account) or a reply in a thread Senapati wrote in. It is stored
-  before Linear's webhook is acknowledged. If storing fails, the webhook
-  answers 503 and Linear redelivers. Redeliveries are kept once. Issue edits,
-  integrations' comments and Senapati's own comments are not pings.
-- **Tasks.** Pings stay pending until the session accepts them into a task,
-  and every new connection replays them, so a restart neither loses nor
-  duplicates work. A task is done only with a result.
-- **Presence on Linear** (with `linear.apiKey`). Each stored ping gets a 👀
-  reaction at once, so you can see it arrived. Senapati's Linear status stays
-  clear while things are fine and says so when no main session is attached,
-  it is at its usage limit (until when), or a task is blocked on you. A ping
-  still unaccepted after `linear.nudgeAfter` (default 15 minutes) gets a
-  comment in its thread mentioning its author and saying why it waits, once
-  per thread and reason. The main session's comments go through Mahamantri
-  too (`samrajya_reply`), so they are Senapati's whoever the session's Linear
-  connector belongs to.
-- **Keeping the main session up.** With `bridge.keepMain`, Mahamantri starts
-  the main session whenever none has been attached for two minutes (Claude
-  Code ends a background session after 8 hours idle). When the session hits
-  its usage limit, the plugin tells Mahamantri, which wakes it with a notice
-  once the limit resets.
-- **Action journal.** Significant external actions, such as Linear replies, are
-  recorded before they are attempted. One never resolved is reported as
-  uncertain, to be checked before it is retried.
-- **The brain:** Samrajya's memory of the work (see below).
+## What it guarantees
 
-All of this lives in one bbolt file (`bridge.store`), locked so a second
+- **Nothing is lost.** A message is stored, with its owner, before its surface
+  is told it arrived. If storing fails, the surface retries. Redeliveries are
+  kept once. A message stays pending until its owner accepts it.
+- **Follow-ups go where the work is.** A conversation routed to a task goes to
+  that task's worker. A reply to something a worker posted goes to that worker.
+- **Parallel work runs in parallel.** Each piece of work gets a worker session
+  of its own, up to `agents.maxWorkers` at once.
+- **The main session stays reachable.** It has no Edit or Write, so it
+  dispatches long work instead of doing it.
+- **Sessions are supervised.** Lost sessions are replaced, and failed launches
+  are retried, then reported. A session that stops listening is relaunched
+  with what waits for it. A main session stuck in one step is reported to you
+  in your `home` conversation.
+- **Usage limits are handled.** Nothing is launched while limited. The people
+  waiting are told why, and the work resumes when the limit resets.
+- **External actions are journaled.** Every reply is recorded before it is
+  posted. One never confirmed is reported as uncertain, to be checked before
+  it is retried.
+
+All of it lives in one bbolt file (`bridge.store`), locked so that a second
 mahamantri cannot open it.
 
-## Modes
+## Surfaces
 
-`mode:` picks what the main session runs on:
+A surface is where messages come from and replies go. Each message belongs to
+a *conversation* (`linear:<issue>`, `telegram:<chat>`), and each surface has a
+policy for new ones:
 
-- **`claude`** (the default) is an interactive Claude Code session that you
-  start, on your Claude subscription, reachable from your phone through Remote
-  Control. The Samrajya channel plugin
-  ([`../integrations/claude-channel`](../integrations/claude-channel)) pulls
-  pings from the bridge into it and gives it the bridge tools.
-- **`opencode`** is a session on an `opencode serve` server. Mahamantri creates
-  it once and remembers it, installs the main role
-  (`opencode.instructionsFile`, default `../senapati/senapati.md`) as its
-  instructions, and prompts it with each ping, queued behind its current turn.
-  It reaches the bridge through the same plugin's MCP server, configured in
-  opencode (see the plugin's README).
+- **Linear** (`linear:`; on when `signingSecret` is set). A ping is a comment
+  that @-mentions Senapati (the bot account) or a reply in a thread it wrote
+  in.
+  - A trusted person's ping on an issue nobody works on starts a worker for
+    it (`startsWork`, default on). An issue is a piece of work.
+  - Pings get a 👀, and Senapati's Linear status shows problems.
+  - A ping left waiting `nudgeAfter` (15m) is answered with why.
+  - Replies are posted as Senapati, whoever the session's connector belongs
+    to.
+- **Telegram** (`telegram:`; on when `botToken` is set). A bot you write to.
+  - Messages are polled, so no public webhook is needed. Each is stored
+    together with the read position, so a restart neither loses nor repeats
+    one.
+  - Only `trustedUserIDs` are heard, in private chats, plus any `chatIDs`
+    groups.
+  - A chat goes to the main session (`startsWork`, default off), which
+    answers or dispatches. The worker reports in the chat, and your replies
+    to its messages reach it.
+  - Voice notes, photos and documents arrive as attachments a session can
+    fetch.
+  - Messages waiting `nudgeAfter` (2m) are answered with why.
+  - Use a bot of its own for each mahamantri: two programs polling one bot
+    steal each other's messages.
+  - Telegram keeps undelivered messages for 24 hours. Messages sent while
+    mahamantri was down longer than that are lost.
 
-Either way, the session's role is [`../senapati/senapati.md`](../senapati/senapati.md):
-own the outcome, do the work instead of routing it, never wait or poll, accept a
-ping before working on it, and reply in its thread.
+`home:` names the conversation where Samrajya tells you about itself, for
+example `telegram:<your chat id>`.
 
-## Agents: several sessions at once
+A new surface is an adapter implementing `bridge.Surface` (see
+`bridge/surface.go`, and `linear/surface.go` and `telegram/` for examples),
+registered in `main.go` with its policy.
 
-With `agents.enabled: true` (mode claude), mahamantri runs the sessions
-itself instead of serving one main session you start. See
-[`../docs/design/agents.md`](../docs/design/agents.md) for the design.
+## Sessions
 
-- **The main** talks to you (Remote Control, `agents.remoteControl`) and keeps
-  the overview. Its role is [`../senapati/main.md`](../senapati/main.md). It is
-  started without Edit and Write, so long work goes to workers
-  (`samrajya_dispatch`).
-- **Workers**: each Linear issue a trusted person pings gets a worker of its
-  own, with role [`../senapati/worker.md`](../senapati/worker.md). Follow-ups
-  on that issue, in any thread, go to the same worker. A worker acts only on
-  its own task and replies only on its own issue; the bridge enforces this.
-- **The supervisor** launches each agent as a `claude --bg` session in
-  `bridge.mainDirectory`, named `<namePrefix>-<agent>-g<generation>`. Each
-  session gets its agent id and a secret file through `--settings` env, and
-  its role through `--append-system-prompt-file`. The supervisor:
-  - runs at most `agents.maxWorkers` workers at once. The rest wait, and their
-    authors are told why;
-  - stops a worker that has nothing to do after 30 minutes, or after a minute
-    when other work is waiting for a slot;
-  - replaces a session that stops answering, fencing the old one out first;
-  - retries a launch that never attaches, and after three tries blocks the
-    task and says so on Linear;
-  - adopts sessions after a restart, and stops sessions with its prefix that
-    belong to no agent;
-  - launches nothing while the account is at its usage limit.
+`mode: claude` (the default) runs Claude Code background sessions in
+`bridge.mainDirectory`, named `<agents.namePrefix>-<agent>-g<generation>`:
+
+- **The main** talks to you through Remote Control (`agents.remoteControl`)
+  and keeps the overview. Its role is
+  [`../senapati/main.md`](../senapati/main.md).
+- **A worker per task**, with role
+  [`../senapati/worker.md`](../senapati/worker.md). It acts only on its own
+  task and replies only in its task's conversations; the bridge enforces this.
 - `agents.mainArgs` and `agents.workerArgs` are added to the launches, for
   example `["--model", "sonnet"]`.
 
-Agents mode replaces `bridge.keepMain` and `restart-main.sh`. To switch, stop
-the main session you started yourself (`claude stop <id>`), enable agents, and
-restart mahamantri. To switch back, set `agents.enabled: false`, restart
-mahamantri and start the main session as before. The plugin must be 0.2.0 or
-later in the main directory (`claude plugin update samrajya@samrajya --scope
-local`, run there).
+**How messages reach a session.** Each session's plugin attaches it as its
+agent, with a per-launch secret: a replaced session can no longer act. Its
+first work comes as its launch prompt. Between turns, a waiter hook (Claude
+Code's `asyncRewake`) waits for new messages and wakes the session with
+them. Claude Code's channels are not used: an account's policy can switch
+them off.
+
+`mode: opencode` runs one main session on an `opencode serve` server, prompted
+with each message, with no workers. Its plugin attaches as `main` with the
+secret in `<agents.stateDir>/main.secret` (see the plugin's README). In this
+mode the main does the work itself, so the parallelism guarantees above do not
+apply.
 
 ## Run
 
 ```sh
-cp mahamantri.yaml.example mahamantri.yaml   # fill in the Linear settings
-go build -o mahamantri . && ./mahamantri mahamantri.yaml
+cp mahamantri.yaml.example mahamantri.yaml   # fill in your surfaces
+go build -o mahamantri . && ./mahamantri check mahamantri.yaml
+./mahamantri mahamantri.yaml
 ```
 
-Startup checks everything first: config, store lock, both ports free, and, in
-opencode mode, the server and the main session. It exits with a message saying
-what to fix. Run it as a service, for example a systemd user unit with
-`Restart=on-failure`. Stopping it never stops the main session. Pings that
-arrive while it is down are redelivered by Linear; pings already stored wait in
-the inbox.
+Run it as a systemd user service, then use
+[`../scripts/samrajya`](../scripts/samrajya):
 
-On each start mahamantri writes the bridge's address, a fresh token and the
-main session's directory to `bridge.discoveryFile` (default
-`$XDG_STATE_HOME/samrajya/bridge.json`), readable only by you. The plugin reads
-it. Only a session running in `bridge.mainDirectory` (default: the workspace)
-attaches as the main session by itself. A second session stays passive until it
-is told to take over. `bridge.trustedUserIDs` lists the Linear users who may ask
-for work. Pings from anyone else arrive marked untrusted.
+- `status`: the service, the sessions and what waits;
+- `restart`: sessions reattach by themselves;
+- `restart-main`: a new main session;
+- `update`: test, build, install the plugin and restart;
+- `cutover` and `rollback`: switch a setup from before surfaces to this
+  version, and undo it.
+
+Stopping mahamantri never stops the sessions. They reattach when it is back,
+and messages that arrive meanwhile are redelivered by their surface.
+
+On each start mahamantri writes the bridge's address and a fresh token to
+`bridge.discoveryFile` (default `$XDG_STATE_HOME/samrajya/bridge.json`),
+readable only by you.
 
 ## The workspace
 
-`workspace:` is the directory that holds the projects, one per directory
-(`../repos` here, which git ignores). How each project is worked on, including
-worktrees, dependencies, services and branches, belongs in that project's own
-instruction files, not in Samrajya.
+`workspace:` is the directory that holds the projects, one per directory. How
+each project is worked on belongs in that project's own instruction files, not
+in Samrajya. This covers worktrees, dependencies, services and branches.
 
 ## Memory (the brain)
 
 `brain:` is a directory of short markdown notes, one per fact worth knowing next
-time: a person's standing instructions, facts in neither the code nor Linear,
-problems that keep coming back. `INDEX.md` lists them. The session reads and
-writes them through the bridge (`samrajya_memory`, `samrajya_remember`,
+time: a person's standing instructions, facts in neither the code nor the
+conversations, problems that keep coming back. `INDEX.md` lists them. Sessions
+read and write them through the bridge (`samrajya_memory`, `samrajya_remember`,
 `samrajya_forget`), and they are plain files you can edit too. It is kept small
 on purpose: notes under 1,500 bytes, at most 50.

@@ -1,19 +1,24 @@
 # Samrajya
 
-Opinionated Agentic AI framework to manage agentic workflows with Claude Code or opencode, and Linear.
+An assistant that works for you on several things at once, built on Claude
+Code (or opencode).
 
-Samrajya's main assistant is one hands-on agent session. It does the work
-itself and delegates to background agents only when that is faster. You talk
-to it directly or through Linear.
+You talk to its main session in the terminal, through Remote Control, or on
+any of Samrajya's surfaces: Linear today, Telegram, and whatever is added
+next. The main session answers and keeps the overview. Work that takes time
+goes to worker sessions that run in parallel, each owning one piece of work
+and reporting where it was asked. Nothing has to be a ticket. A question in a
+chat is answered, and a request from anywhere becomes a piece of work.
 
-- `mahamantri/`: the Go bridge. It holds a durable inbox of Linear pings (a
-  mention of Senapati, the bot account, or a reply in its thread), the tasks
-  they become, a journal of external actions, and the brain, Samrajya's memory
-  of the work. It serves them to the main session over a local API. The session
-  runs on Claude Code (`mode: claude`, on your Claude subscription and reachable
-  through Remote Control) or on an opencode server (`mode: opencode`). See its
-  README.
-- `integrations/claude-channel/`: the Samrajya plugin. It pushes pings into a
-  Claude Code session as channel events and gives either kind of session its
-  bridge tools.
-- `senapati/senapati.md`: the main session's role.
+- `mahamantri/`: Samrajya's core, in Go. It takes messages from every surface
+  into a durable inbox and routes each to the session that owns its work. It
+  runs and supervises the sessions, and keeps the tasks, the journal of
+  external actions and the brain (Samrajya's memory). See its README.
+- `integrations/claude-channel/`: the Samrajya plugin each session loads. It
+  attaches the session as its agent, wakes it when messages arrive, and gives
+  it its tools.
+- `senapati/`: the roles (`main.md`, `worker.md`; `senapati.md` for opencode).
+- `scripts/samrajya`: one command to run it (status, restart, update, cutover,
+  rollback).
+- `docs/design/`: how it works and why ([agents](docs/design/agents.md),
+  [surfaces](docs/design/surfaces.md)).

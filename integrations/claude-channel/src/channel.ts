@@ -224,7 +224,7 @@ export function createChannel(opts: ChannelOptions) {
   const abort = new AbortController();
 
   const agent = opts.agent;
-  const mcp = new Server({ name: 'samrajya', version: '0.4.0' }, {
+  const mcp = new Server({ name: 'samrajya', version: '0.5.0' }, {
     capabilities: { tools: {} },
     instructions: agent ? instructions : notAnAgent,
   });

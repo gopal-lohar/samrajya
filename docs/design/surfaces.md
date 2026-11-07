@@ -1,7 +1,8 @@
 # Surfaces: Samrajya is not a kanban board
 
-Status: proposed. It builds on [agents.md](agents.md): the inbox, tasks,
-agents and supervisor stay, and the parts tied to Linear are removed.
+Status: built and tested in the sandbox (see Results). It builds on
+[agents.md](agents.md): the inbox, tasks, agents and supervisor stay, and the
+parts tied to Linear are removed.
 
 ## Why
 
@@ -59,11 +60,16 @@ Linear issue, a Telegram message, the terminal, or nothing at all. It has:
   its agent.
 - `reportTo`: conversations its agent may **reply in** without taking all
   of their messages. A worker dispatched from the person's Telegram chat
-  reports there, but the chat keeps going to the main.
+  reports there, but the chat keeps going to the main. A reply to a message
+  the worker posted still reaches the worker: what an agent posts is indexed
+  (`posted` bucket) and a surface's reply-to is routed by it.
 - `links`: free-form references (an issue identifier, a PR URL) for people
   and agents to follow.
 
-Linear is one place a task can live, not where tasks come from.
+Linear is one place a task can live, not where tasks come from. And not
+everything is a task: a message answered on the spot is accepted without
+one, and a dispatch takes the messages that asked for the work into the
+worker's task.
 
 ### Claude decides; code guarantees
 
@@ -89,12 +95,16 @@ it to existing work. It decides through tools (`samrajya_dispatch`,
 **Per-surface defaults** cover the common case without asking Claude. Each
 adapter declares what a trusted message in a conversation with no task does:
 
-- Linear (`newWork: worker`): a mention on an issue nobody works on starts a
+- Linear (`startsWork: true`): a mention on an issue nobody works on starts a
   worker for it at once. An issue is already a unit of work.
-- Telegram (`newWork: main`): the chat is one long conversation with the
+- Telegram (`startsWork: false`): the chat is one long conversation with the
   person, so it goes to the main, which answers or dispatches.
 
-This is configuration (`linear.newWork`, `telegram.newWork`), not core code.
+This is configuration (`linear.startsWork`, `telegram.startsWork`), not core
+code. Each surface's `Policy` also says whether a finished task's conversation
+reopens it (Linear: yes, an issue stays one piece of work) or goes back to
+the main (a chat), and how long a message may wait before its author is told
+why (Linear 15m, Telegram 2m).
 
 ### Surface adapters
 
@@ -134,16 +144,67 @@ of agent.
 - `mode: opencode` runs only a main, on an opencode server. Mahamantri keeps
   a fixed secret for it, and there are no workers. Dispatch says workers need
   `mode: claude`. This keeps opencode working without a second launcher.
-- Restarting everything is `systemctl --user restart samrajya-mahamantri`,
-  or `scripts/samrajya restart`. Switching an existing setup over is
-  `scripts/samrajya cutover`, and `scripts/samrajya rollback` undoes it.
+- Restarting everything is `scripts/samrajya restart`. Switching an
+  existing setup over is `scripts/samrajya cutover`, and
+  `scripts/samrajya rollback` undoes it, keeping every message received
+  meanwhile (the store is marked schema 1 again; schema 2 only adds what the
+  old version ignores).
+
+### Delivery: a waiter, not channels
+
+While this was built, Claude Code (2.1.319) began refusing `--channels`
+unless an organisation enables them, and dropping channel events silently.
+Workers still worked, because their first piece of work is their launch
+prompt; but the main never heard of a chat message that arrived after its
+launch.
+
+Delivery now uses Claude Code's `asyncRewake` hooks. When a session ends a
+turn, its `Stop` hook starts a waiter in the background that long-polls
+`/v1/wait`. When messages arrive, the waiter exits 2 with them, and Claude
+Code wakes the session with them as input. The session's next turn ends with
+a new waiter.
+
+- Each message is handed over once (`Agent.DeliveredSeq`), and handing over
+  marks the session in a turn. The waiter reports the previous turn's end
+  before it waits, so the two cannot race.
+- A newer waiter for an agent replaces an older one.
+- If a session is between turns with no waiter while a message has waited
+  90s, the supervisor relaunches it with the message in its brief. Delivery
+  therefore does not depend on the hook alone.
+
+### Telegram
+
+- Updates are long-polled, with `deleteWebhook` at start and an explicit
+  `allowed_updates`.
+- They are stored together with the offset in one transaction, with ids
+  `telegram:<chat>:<message>`. A crash between fetching and storing
+  re-fetches, and the messages are kept once.
+- Only trusted users are heard (private chats, plus listed groups). Others
+  are dropped and logged: no reaction, no wake, no usage.
+- Replies use `reply_parameters` with `allow_sending_without_reply`, as plain
+  text, split at 4096 bytes. A rate limit is waited out briefly rather than
+  left uncertain.
+- Voice notes, audio, photos, video and documents are attachments.
+  `samrajya_fetch` saves one for a session to read.
+- Each mahamantri needs its own bot token: two pollers steal each other's
+  updates (a 409, logged).
+- Telegram keeps undelivered updates for 24 hours.
+
+### Later surfaces
+
+A call or a meeting is a conversation owned by an agent of its own kind (a
+voice agent cannot wait for a turn to end); that needs a launcher with an
+interrupt operation, not a stretched `Surface`. Forum topics could be their
+own conversations (`telegram:<chat>:<topic>`).
 
 ## Tools (plugin protocol 3)
 
 | tool | who | change |
 |---|---|---|
 | `samrajya_reply` | all | `conversation`, `thread_id`, `body`. A worker may reply only in its task's conversations and `reportTo`. |
-| `samrajya_dispatch` | main | `title`, `brief`, `conversation`, `thread_id`, `route` (the conversation's new messages go to the worker; default: what the surface's `newWork` says), `links`, `project`. |
+| `samrajya_dispatch` | main | `title`, `brief`, `conversation`, `thread_id`, `route` (the conversation's new messages go to the worker; default: the surface's `startsWork`), `links`, `event_ids` (the messages that asked for it), `project`. |
+| `samrajya_accept` | all | event ids alone accept a message answered on the spot, with no task. |
+| `samrajya_fetch` | all | save a file a message carried. |
 | `samrajya_create_task` | main | `links` instead of `issue`. |
 | `samrajya_take_over` | — | removed. |
 
@@ -152,13 +213,15 @@ memory, agents, message, stop, report.
 
 ## Migration
 
-- The store stays at schema 2; the new fields are optional. Old Linear events
-  get `conversation` from their issue UUID. `Task.Issue` and
-  `Event.Issue*` are read as links.
+- The store stays at schema 2; the new fields are optional. At start, open
+  tasks with no conversation are routed to the Linear issues of their events
+  (`LinkOpenIssues`), so follow-ups on work begun in single-session mode do
+  not start a second worker.
 - Config: `bridge.trustedUserIDs` becomes `linear.trustedUserIDs`.
   `bridge.keepMain` and `agents.enabled` are refused with a message saying
   what replaces them. `telegram:` is new and optional.
-- The old plugin (protocol 2) is refused with "update the plugin".
+- The old plugin (protocol 2) is refused with "update the plugin". The plugin
+  is 0.5 or later.
 
 ## Acceptance
 
@@ -184,3 +247,28 @@ B. A Telegram follow-up during the work reaches the main; the main relays it
    to the worker with `samrajya_message`.
 C. Restarting Mahamantri mid-work: everything reattaches, nothing is
    duplicated, and the Telegram offset is not replayed.
+
+## Results
+
+Go and plugin tests cover acceptance 1-7 plus delivery, the deaf-session
+fallback, batch storage with the read position, config migration and store
+downgrade. In the sandbox, on Haiku, with fake Linear and Telegram APIs:
+
+- **Main launch and idle wake.** The main launched and attached in 3s. A
+  Telegram message to the idle main was answered in the chat 6s later.
+- **A.** Two Linear issues and a Telegram request arrived at once:
+  - both workers replied in their threads about 17s later;
+  - the main acknowledged in Telegram within 2s and dispatched the work;
+  - the third worker started when a slot freed;
+  - it reported in the chat, with the file verified.
+- **B.** A reply to the worker's Telegram message went straight to that
+  worker, which made the change in 6s. An unrelated chat message went to
+  the main.
+- **C.** Mahamantri was restarted while a worker was mid-step:
+  - all sessions reattached within 2s;
+  - the worker's reply was posted once;
+  - no Telegram message was replayed;
+  - the waiters reconnected with the new token.
+- **D.** The main's waiter was killed. The supervisor relaunched the main
+  after about 100s, with the waiting message in its brief, and it was
+  answered.

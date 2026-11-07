@@ -1,44 +1,52 @@
 # Relative paths below resolve against the directory containing this file,
 # not the directory you launch mahamantri from.
 
-# What the main session runs on: "claude" (an interactive Claude Code session
-# you start, with the Samrajya channel plugin) or "opencode" (a session on an
-# opencode server, configured below). See the README.
+# "claude" (the default): mahamantri runs a main Claude Code session and a
+# worker per piece of work. "opencode": one main session on an opencode
+# server (configured below), no workers. See the README.
 mode: claude
 
 # The projects this system works on, one directory per project.
 workspace: "../repos"
 # Samrajya's memory of the work. Empty: no memory.
 brain: "../brain"
+# Where Samrajya tells you about itself (a stuck or failing main session),
+# e.g. "telegram:<your chat id>". Empty: only the log.
+home: ""
 
+# Linear: comments that mention Senapati or reply in its threads. On when
+# signingSecret is set.
 linear:
   signingSecret: ""          # or set LINEAR_SIGNING_SECRET
   listenAddr: ":8080"        # where Linear's webhook is delivered
   botUserID: ""              # Senapati's own Linear user id (actor.id on its comments)
   botName: "Senapati"
   botHandle: ""              # what comments @-mention it as, without the @
-  # A Linear API key of Senapati's account, or set LINEAR_API_KEY. Optional:
-  # with it, each ping gets a reaction when stored (receivedEmoji, default 👀),
-  # Senapati's Linear status shows when it is offline or blocked on you, and a
-  # ping left waiting gets a comment mentioning its author.
+  # A Linear API key of Senapati's account, or set LINEAR_API_KEY. Needed to
+  # reply; with it each ping also gets a reaction (receivedEmoji, default 👀),
+  # Senapati's status shows problems, and a ping left waiting is answered.
   apiKey: ""
-  nudgeAfter: "15m"           # 0s: never
+  nudgeAfter: "15m"          # 0s: never
+  trustedUserIDs: []         # Linear users who may ask for work; empty = everyone
+  # startsWork: true         # a trusted ping on a new issue starts a worker
+
+# Telegram: a bot you write to. On when botToken is set. Give each mahamantri
+# a bot of its own.
+telegram:
+  botToken: ""               # or set TELEGRAM_BOT_TOKEN
+  trustedUserIDs: []         # your Telegram user id; everyone else is ignored
+  # chatIDs: []              # group chats to listen in too
+  # nudgeAfter: "2m"
+  # startsWork: false        # chats go to the main session, which dispatches
 
 bridge:
-  listenAddr: "127.0.0.1:4098"  # the API the main session's tools use; loopback only
+  listenAddr: "127.0.0.1:4098"  # the API the sessions' tools use; loopback only
   store: mahamantri.db
   # discoveryFile: ""        # default $XDG_STATE_HOME/samrajya/bridge.json
-  # mainDirectory: ""        # where the main session runs; default: the workspace
-  trustedUserIDs: []         # Linear users who may ask for work; empty = everyone
-  # Starts the main session when none is attached for 2 minutes (mode claude).
-  # Claude Code ends a background session after hours idle.
-  keepMain: ["../integrations/claude-channel/restart-main.sh", "--ensure"]
+  # mainDirectory: ""        # where sessions run; default: the workspace
 
-# Several sessions at once (mode claude): a main that talks to you and a
-# worker per Linear issue, launched and supervised by mahamantri. Replaces
-# bridge.keepMain. See ../docs/design/agents.md.
+# The sessions mode claude runs. See ../docs/design/agents.md.
 agents:
-  enabled: false
   maxWorkers: 2              # workers running at once; the rest wait
   remoteControl: "Samrajya"  # the main session's Remote Control name
   workerRemoteControl: false # Remote Control for each worker too
