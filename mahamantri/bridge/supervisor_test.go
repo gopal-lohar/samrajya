@@ -325,6 +325,15 @@ func TestSupervisorWaitsForSessionsToReattachAfterARestart(t *testing.T) {
 	if got := mustAgent(t, r, w); got.State != AgentLive || len(r.l.stops) != 0 {
 		t.Errorf("lost before it could reattach: %+v %v", got, r.l.stops)
 	}
+	// A session that is not running at all is replaced at once.
+	r.l.mu.Lock()
+	delete(r.l.running, "samrajya-main-g1")
+	r.l.mu.Unlock()
+	r.tick()
+	r.tick()
+	if got := mustAgent(t, r, MainAgent); got.Gen != 2 || got.State != AgentStarting {
+		t.Errorf("a main whose session is gone was not relaunched: %+v", got)
+	}
 }
 
 // Acceptance 13: nothing launches at the usage limit; just after it, one

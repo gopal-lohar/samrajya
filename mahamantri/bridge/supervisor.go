@@ -170,9 +170,10 @@ func (sv *Supervisor) check(ctx context.Context, a Agent, byName map[string]Sess
 			sv.fail(ctx, a, byName, fmt.Sprintf("its session did not attach within %s", sv.StartTimeout))
 		}
 	case AgentLive:
-		if !live && now.Sub(sv.started) < reattachGrace {
+		if _, running := byName[a.Name]; !live && running && now.Sub(sv.started) < reattachGrace {
 			// Mahamantri just started: attachments are not kept across
-			// restarts, and running sessions reattach within this.
+			// restarts, and running sessions reattach within this. One
+			// that is not running at all is replaced at once.
 			return
 		}
 		if !live {
