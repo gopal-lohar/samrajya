@@ -5,3 +5,6 @@ mahamantri.yaml.*
 mahamantri.log
 mahamantri-*.json
 mahamantri-*.db
+mahamantri.db
+mahamantri.db.*
+*.db.before-*
