@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -272,4 +274,39 @@ func TestOpenTasksAreLinkedToTheirIssuesOnUpgrade(t *testing.T) {
 		t.Errorf("%d tasks: the follow-up started new work", len(tasks))
 	}
 	_ = task
+}
+
+func (f *fakeChat) DeliverFiles(ctx context.Context, conv, thread, body string, files []File) (Posted, error) {
+	names := []string{}
+	for _, fl := range files {
+		names = append(names, fl.Name)
+	}
+	return f.Deliver(ctx, conv, thread, body+" +"+strings.Join(names, ","))
+}
+
+// A reply can carry files, on a surface that takes them; bad paths are
+// refused before anything is posted.
+func TestARepliesFilesAreCheckedAndSent(t *testing.T) {
+	r, chat := chatRig(t)
+	r.tick()
+	main := r.attach(MainAgent)
+	dir := t.TempDir()
+	shot := filepath.Join(dir, "shot.png")
+	os.WriteFile(shot, []byte("png"), 0o600)
+	for name, files := range map[string][]string{
+		"relative": {"shot.png"}, "missing": {filepath.Join(dir, "nope.png")}, "directory": {dir},
+	} {
+		if code, _ := main.do("POST", "/v1/reply", map[string]any{"conversation": "chat:1", "body": "x", "files": files}); code != http.StatusBadRequest {
+			t.Errorf("%s: %d", name, code)
+		}
+	}
+	if code, out := main.do("POST", "/v1/reply", map[string]any{"conversation": "chat:1", "body": "look", "files": []string{shot}}); code != http.StatusOK {
+		t.Fatalf("reply with a file: %d %v", code, out)
+	}
+	if got := chat.got(); len(got) != 1 || got[0] != "1  look +shot.png" {
+		t.Errorf("sent %q", got)
+	}
+	if code, _ := main.do("POST", "/v1/reply", map[string]any{"conversation": "linear:x", "body": "x", "files": []string{shot}}); code != http.StatusBadRequest {
+		t.Errorf("files to a surface that cannot take them: %d", code)
+	}
 }

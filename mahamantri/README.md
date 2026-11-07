@@ -58,7 +58,8 @@ policy for new ones:
     answers or dispatches. The worker reports in the chat, and your replies
     to its messages reach it.
   - Voice notes, photos and documents arrive as attachments a session can
-    fetch.
+    fetch. Replies can carry files: images go as photos, anything else as
+    documents. On Linear, files are uploaded and linked in the comment.
   - Messages waiting `nudgeAfter` (2m) are answered with why.
   - Use a bot of its own for each mahamantri: two programs polling one bot
     steal each other's messages.

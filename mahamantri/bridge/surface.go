@@ -190,6 +190,50 @@ func (s *Server) markReceived(in Inbound) {
 	}()
 }
 
+// File is a local file a reply carries.
+type File struct {
+	Path string
+	Name string
+	Size int64
+}
+
+// FileDeliverer is a surface that can send files with a reply (a photo or
+// document in a chat, an attachment on an issue).
+type FileDeliverer interface {
+	DeliverFiles(ctx context.Context, conv, thread, body string, files []File) (Posted, error)
+}
+
+// Limits on a reply's files: what the surfaces accept.
+const (
+	maxReplyFiles = 10
+	maxFileSize   = 50 << 20
+)
+
+// checkFiles turns the paths a reply names into files, refusing what is
+// not a regular file or is too big.
+func checkFiles(paths []string) ([]File, error) {
+	if len(paths) > maxReplyFiles {
+		return nil, fmt.Errorf("at most %d files per reply", maxReplyFiles)
+	}
+	var out []File
+	for _, p := range paths {
+		if !filepath.IsAbs(p) {
+			return nil, fmt.Errorf("file %q: give an absolute path", p)
+		}
+		st, err := os.Stat(p)
+		switch {
+		case err != nil:
+			return nil, fmt.Errorf("file %q: %v", p, err)
+		case !st.Mode().IsRegular():
+			return nil, fmt.Errorf("file %q is not a regular file", p)
+		case st.Size() > maxFileSize:
+			return nil, fmt.Errorf("file %q is %d MB; at most %d MB", p, st.Size()>>20, maxFileSize>>20)
+		}
+		out = append(out, File{Path: p, Name: filepath.Base(p), Size: st.Size()})
+	}
+	return out, nil
+}
+
 // Fetcher is a surface that keeps the files messages carry (Telegram) and
 // can hand one to an agent.
 type Fetcher interface {

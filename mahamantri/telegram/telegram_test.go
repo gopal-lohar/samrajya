@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -187,5 +188,52 @@ func TestErrorsNeverCarryTheToken(t *testing.T) {
 	_, err := bot.Deliver(context.Background(), "telegram:7", "", "hi")
 	if err == nil || strings.Contains(err.Error(), "SECRET-TOKEN") {
 		t.Errorf("error %v", err)
+	}
+}
+
+// uploadAPI records multipart sends.
+type uploadAPI struct {
+	mu    sync.Mutex
+	sends []string // "method field=filename caption=... reply=..."
+	n     int64
+}
+
+func (u *uploadAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	method := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+	r.ParseMultipartForm(1 << 20)
+	desc := method
+	for field, fh := range r.MultipartForm.File {
+		data, _ := io.ReadAll(must(fh[0].Open()))
+		desc += " " + field + "=" + fh[0].Filename + ":" + string(data)
+	}
+	desc += " caption=" + r.FormValue("caption") + " reply=" + r.FormValue("reply_parameters")
+	u.mu.Lock()
+	u.sends = append(u.sends, desc)
+	u.n++
+	n := u.n
+	u.mu.Unlock()
+	json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": map[string]any{"message_id": 700 + n}})
+}
+
+func must[T any](v T, _ error) T { return v }
+
+func TestFilesGoAsPhotosOrDocumentsWithTheCaption(t *testing.T) {
+	api := &uploadAPI{}
+	ts := httptest.NewServer(api)
+	defer ts.Close()
+	bot := &Bot{Token: "T", URL: ts.URL, Logger: log.New(io.Discard, "", 0)}
+	dir := t.TempDir()
+	shot, notes := filepath.Join(dir, "shot.PNG"), filepath.Join(dir, "notes.txt")
+	os.WriteFile(shot, []byte("png"), 0o600)
+	os.WriteFile(notes, []byte("txt"), 0o600)
+	files := []bridge.File{{Path: shot, Name: "shot.PNG", Size: 3}, {Path: notes, Name: "notes.txt", Size: 3}}
+	p, err := bot.DeliverFiles(context.Background(), "telegram:7", "11", "Here it is", files)
+	if err != nil || p.ID != "701" {
+		t.Fatalf("posted %+v %v", p, err)
+	}
+	if len(api.sends) != 2 ||
+		!strings.HasPrefix(api.sends[0], "sendPhoto photo=shot.PNG:png caption=Here it is reply={\"allow_sending_without_reply\":true,\"message_id\":11}") ||
+		!strings.HasPrefix(api.sends[1], "sendDocument document=notes.txt:txt caption= reply=") {
+		t.Errorf("sends %q", api.sends)
 	}
 }
