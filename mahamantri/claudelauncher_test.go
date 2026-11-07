@@ -58,3 +58,15 @@ func TestClaudeLauncherStartsABackgroundSessionAsTheAgent(t *testing.T) {
 		t.Errorf("main argv %q", got)
 	}
 }
+
+func TestClaudeRunsOutsideTheServiceUnderSystemd(t *testing.T) {
+	look := func(string) (string, error) { return "/usr/bin/systemd-run", nil }
+	argv := []string{"claude", "--bg"}
+	if got := outsideService(argv, false, look); !slices.Equal(got, argv) {
+		t.Errorf("outside systemd: %q", got)
+	}
+	got := outsideService(argv, true, look)
+	if !slices.Equal(got, []string{"/usr/bin/systemd-run", "--user", "--scope", "--quiet", "--collect", "--", "claude", "--bg"}) {
+		t.Errorf("under systemd: %q", got)
+	}
+}
