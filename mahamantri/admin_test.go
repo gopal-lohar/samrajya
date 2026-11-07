@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -70,5 +71,21 @@ func TestDowngradeStoreKeepsEverything(t *testing.T) {
 	defer s.Close()
 	if p, _ := s.Pending(0); len(p) != 1 {
 		t.Errorf("pending %v", p)
+	}
+}
+
+func TestClaudesInstallDirectoryIsOnPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "/usr/bin:/bin")
+	os.MkdirAll(filepath.Join(home, ".local", "bin"), 0o755)
+	os.WriteFile(filepath.Join(home, ".local", "bin", "claude"), []byte("#!/bin/sh\n"), 0o755)
+	withClaudeOnPath()
+	withClaudeOnPath()
+	if p, err := exec.LookPath("claude"); err != nil || p != filepath.Join(home, ".local", "bin", "claude") {
+		t.Errorf("claude: %q %v", p, err)
+	}
+	if strings.Count(os.Getenv("PATH"), ".local/bin") != 1 {
+		t.Errorf("PATH %q", os.Getenv("PATH"))
 	}
 }
