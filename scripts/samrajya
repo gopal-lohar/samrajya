@@ -95,18 +95,26 @@ cmd_build() {
 }
 
 # install_plugin makes the main directory's sessions load the plugin in
-# this checkout.
+# this checkout. `claude plugin update --scope local` may update another
+# directory's entry instead of this one, so it only fills the plugin cache;
+# the entries are then set by hand: this directory's to the new version,
+# every other one as it was.
 install_plugin() {
-  local dir=$1 want got
+  local dir=$1 want f=~/.claude/plugins/installed_plugins.json before
   want=$(jq -r .version "$root/integrations/claude-channel/plugin/.claude-plugin/plugin.json")
+  before=$(mktemp)
+  cp "$f" "$before"
   claude plugin marketplace update samrajya >/dev/null
-  (cd "$dir" && claude plugin update samrajya@samrajya --scope local >/dev/null) || true
-  got=$(jq -r --arg dir "$dir" '.plugins["samrajya@samrajya"][] | select(.projectPath == $dir) | .version' ~/.claude/plugins/installed_plugins.json)
-  if [[ $got != "$want" ]]; then
-    (cd "$dir" && claude plugin install samrajya@samrajya --scope local >/dev/null) || true
-    got=$(jq -r --arg dir "$dir" '.plugins["samrajya@samrajya"][] | select(.projectPath == $dir) | .version' ~/.claude/plugins/installed_plugins.json)
-  fi
-  [[ $got == "$want" ]] || die "plugin for $dir is $got, want $want: install it with 'claude plugin install samrajya@samrajya --scope local' in $dir"
+  (cd "$dir" && claude plugin update samrajya@samrajya --scope local >/dev/null 2>&1) || true
+  local cache=~/.claude/plugins/cache/samrajya/samrajya/$want
+  [[ -f $cache/server.mjs ]] || die "the plugin cache has no $want ($cache): run 'claude plugin update samrajya@samrajya' and retry"
+  jq --slurpfile before "$before" --arg dir "$dir" --arg v "$want" --arg path "$cache" --arg now "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" '
+    .plugins["samrajya@samrajya"] = (
+      [$before[0].plugins["samrajya@samrajya"][] | select(.projectPath != $dir)]
+      + [(($before[0].plugins["samrajya@samrajya"][] | select(.projectPath == $dir)) // {scope: "local", projectPath: $dir, installedAt: $now})
+         + {version: $v, installPath: $path, lastUpdated: $now}])' "$f" >"$f.tmp"
+  mv "$f.tmp" "$f"
+  rm -f "$before"
   echo "plugin $want installed for $dir"
 }
 
