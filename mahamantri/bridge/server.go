@@ -371,16 +371,22 @@ func (s *Server) withAgent(w http.ResponseWriter, r *http.Request, next agentHan
 // only in its task's conversations.
 func (s *Server) reply(w http.ResponseWriter, r *http.Request, agent string) {
 	var body struct {
-		TaskID       string `json:"taskId"`
-		Conversation string `json:"conversation"`
-		ThreadID     string `json:"threadId"`
-		Body         string `json:"body"`
+		TaskID       string   `json:"taskId"`
+		Conversation string   `json:"conversation"`
+		ThreadID     string   `json:"threadId"`
+		Body         string   `json:"body"`
+		Files        []string `json:"files"`
 	}
 	if !decode(w, r, &body) {
 		return
 	}
-	if strings.TrimSpace(body.Body) == "" {
-		writeErr(w, http.StatusBadRequest, "body is required")
+	if strings.TrimSpace(body.Body) == "" && len(body.Files) == 0 {
+		writeErr(w, http.StatusBadRequest, "body or files are required")
+		return
+	}
+	files, err := checkFiles(body.Files)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	conv, err := s.canonical(r.Context(), body.Conversation)
@@ -398,6 +404,11 @@ func (s *Server) reply(w http.ResponseWriter, r *http.Request, agent string) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	fd, canFiles := sf.(FileDeliverer)
+	if len(files) > 0 && !canFiles {
+		writeErr(w, http.StatusBadRequest, sf.Name()+" cannot send files")
+		return
+	}
 	if body.TaskID == "" {
 		body.TaskID = task.ID
 	}
@@ -408,14 +419,25 @@ func (s *Server) reply(w http.ResponseWriter, r *http.Request, agent string) {
 	if body.ThreadID != "" {
 		target += " thread " + body.ThreadID
 	}
-	a, err := s.Store.IntendAs(agent, Action{TaskID: body.TaskID, Kind: sf.Name() + "_reply", Target: target, Intent: truncate(body.Body, 200)})
+	intent := truncate(body.Body, 200)
+	for _, f := range files {
+		intent += " [file " + f.Name + "]"
+	}
+	a, err := s.Store.IntendAs(agent, Action{TaskID: body.TaskID, Kind: sf.Name() + "_reply", Target: target, Intent: intent})
 	if err != nil {
 		reply(w, nil, err)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-	defer cancel()
-	posted, err := sf.Deliver(ctx, conv, body.ThreadID, body.Body)
+	var posted Posted
+	if len(files) > 0 {
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+		defer cancel()
+		posted, err = fd.DeliverFiles(ctx, conv, body.ThreadID, body.Body, files)
+	} else {
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+		posted, err = sf.Deliver(ctx, conv, body.ThreadID, body.Body)
+	}
 	if err != nil {
 		// It may or may not have been posted (a timeout, say): leave the
 		// action unresolved, to be checked before posting again.

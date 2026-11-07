@@ -73,16 +73,16 @@ const tools = [
   },
   {
     name: 'samrajya_reply',
-    description: 'Post in a conversation as Samrajya, journaled: a Linear issue (a comment, in a thread), a Telegram chat (a message, replying to one). The way to answer anyone on a surface. A worker may reply only in its task\'s conversations, and by default in the first of them.',
+    description: 'Post in a conversation as Samrajya, journaled, with files if you like: a Linear issue (a comment, in a thread), a Telegram chat (a message, replying to one). The way to answer anyone on a surface. Give body, files or both. A worker may reply only in its task\'s conversations, and by default in the first of them.',
     inputSchema: {
       type: 'object',
       properties: {
         conversation: str('Where: the event\'s conversation, e.g. linear:<issue uuid or key> or telegram:<chat id>. A worker may omit it.'),
         thread_id: str('Within it: the event\'s thread (a Linear comment thread, the Telegram message to reply to). Omit to start a new one.'),
         body: str('The message (Markdown on Linear, plain text on Telegram)'),
+        files: { type: 'array', items: { type: 'string' }, description: 'Absolute paths of files to send with it (screenshots, documents; up to 10, 50 MB each): photos or documents on Telegram, attachments linked in the comment on Linear' },
         task_id: str('Task it is for'),
       },
-      required: ['body'],
       additionalProperties: false,
     },
   },
@@ -224,7 +224,7 @@ export function createChannel(opts: ChannelOptions) {
   const abort = new AbortController();
 
   const agent = opts.agent;
-  const mcp = new Server({ name: 'samrajya', version: '0.5.0' }, {
+  const mcp = new Server({ name: 'samrajya', version: '0.6.0' }, {
     capabilities: { tools: {} },
     instructions: agent ? instructions : notAnAgent,
   });
@@ -300,7 +300,7 @@ export function createChannel(opts: ChannelOptions) {
       case 'samrajya_tasks':
         return a.task_id ? bridge.request('GET', `/v1/tasks/${encodeURIComponent(a.task_id)}`) : bridge.request('GET', `/v1/tasks${a.all ? '?all=1' : ''}`);
       case 'samrajya_reply':
-        return bridge.request('POST', '/v1/reply', { conversation: a.conversation, threadId: a.thread_id, body: a.body, taskId: a.task_id });
+        return bridge.request('POST', '/v1/reply', { conversation: a.conversation, threadId: a.thread_id, body: a.body, files: a.files, taskId: a.task_id });
       case 'samrajya_action_intent':
         return bridge.request('POST', '/v1/actions', { taskId: a.task_id, kind: a.kind, target: a.target, intent: a.intent });
       case 'samrajya_action_result':

@@ -91,6 +91,11 @@ func (b *Bot) call(ctx context.Context, method string, params any, out any) erro
 		return fmt.Errorf("telegram %s: %w", method, err)
 	}
 	defer res.Body.Close()
+	return decodeReply(method, res, out)
+}
+
+// decodeReply reads a Bot API reply into out, or the error it reports.
+func decodeReply(method string, res *http.Response, out any) error {
 	raw, _ := io.ReadAll(io.LimitReader(res.Body, 8<<20))
 	var reply struct {
 		OK          bool            `json:"ok"`
