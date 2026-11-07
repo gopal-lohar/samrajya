@@ -1,4 +1,4 @@
-import { readFile, realpath } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 
 // Client for mahamantri's bridge API (mahamantri/bridge). Mahamantri
 // writes its address and a fresh token to the discovery file on every
@@ -8,12 +8,10 @@ import { readFile, realpath } from 'node:fs/promises';
 export interface Discovery {
   url: string;
   token: string;
-  /** Where the main session runs; only a session there attaches by itself. */
-  mainDirectory?: string;
 }
 
-/** The bridge protocol this plugin speaks with an agent id (mahamantri's bridge.ProtocolVersion). */
-export const PROTOCOL = 2;
+/** The bridge protocol this plugin speaks (mahamantri's bridge.ProtocolVersion). */
+export const PROTOCOL = 3;
 
 /** This session's identity as one of Samrajya's agents. */
 export interface Agent {
@@ -21,7 +19,7 @@ export interface Agent {
   secret: string;
 }
 
-/** The agent this session was launched as, from the environment its launcher set; undefined in legacy mode. */
+/** The agent this session was launched as, from the environment its launcher set; undefined for any other session. */
 export async function agentFromEnv(env: NodeJS.ProcessEnv = process.env): Promise<Agent | undefined> {
   const id = env.SAMRAJYA_AGENT;
   const file = env.SAMRAJYA_AGENT_SECRET_FILE;
@@ -57,7 +55,7 @@ export class Bridge {
       if (typeof d.url !== 'string' || typeof d.token !== 'string') {
         throw new BridgeError(0, `${this.discoveryPath} is not a bridge discovery file`);
       }
-      this.discovery = { url: d.url, token: d.token, mainDirectory: typeof d.mainDirectory === 'string' ? d.mainDirectory : undefined };
+      this.discovery = { url: d.url, token: d.token };
     }
     return this.discovery;
   }
@@ -99,30 +97,13 @@ export class Bridge {
     return json as T;
   }
 
-  /** Whether a session in dir is the main one by mahamantri's configuration (any, if none is set). */
-  async isMainDirectory(dir: string): Promise<boolean> {
-    const main = (await this.locate()).mainDirectory;
-    if (!main) return true;
-    const real = async (p: string) => { try { return await realpath(p); } catch { return p; } };
-    return (await real(dir)) === (await real(main));
-  }
-
   /**
-   * Attach: as an agent (agents mode), with the agent id and the secret its
-   * launcher gave it, or as the main session (legacy mode). Returns false
-   * when the bridge will not have this session (another holds the main
-   * attachment, or this session is no agent); throws BridgeError 403 when
-   * its secret is stale - it has been replaced or stopped.
+   * Attach as an agent, with the agent id and the secret its launcher gave
+   * it. Throws BridgeError 403 when the secret is stale (this session has
+   * been replaced or stopped) and 426 when this plugin is too old.
    */
-  async attach(client: string, takeover = false, agent?: Agent): Promise<boolean> {
-    try {
-      const body = agent ? { client, agent: agent.id, secret: agent.secret, protocol: PROTOCOL } : { client, takeover };
-      const out = await this.request<{ attachment: string }>('POST', '/v1/attach', body);
-      this.attachment = out.attachment;
-      return true;
-    } catch (error) {
-      if (error instanceof BridgeError && error.status === 409) return false;
-      throw error;
-    }
+  async attach(client: string, agent: Agent): Promise<void> {
+    const out = await this.request<{ attachment: string }>('POST', '/v1/attach', { client, agent: agent.id, secret: agent.secret, protocol: PROTOCOL });
+    this.attachment = out.attachment;
   }
 }

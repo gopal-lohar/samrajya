@@ -13,7 +13,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { z } from 'zod';
 import { agentFromEnv, type Agent } from '../src/bridge.js';
-import { createChannel, instructions, render, toolsFor } from '../src/channel.js';
+import { createChannel, instructions, notAnAgent, render, toolsFor } from '../src/channel.js';
 import type { Event } from '../src/channel.js';
 
 const channelSchema = z.object({
@@ -23,8 +23,11 @@ const channelSchema = z.object({
 type Notification = z.infer<typeof channelSchema>;
 
 const event = (id: string, seq: number, extra: Partial<Event> = {}): Event => ({
-  id, seq, kind: 'mention', issue: 'ENG-1', issueTitle: 'Fix login', threadId: 'th-1', author: 'Asha', trusted: true, body: 'please fix', ...extra,
+  id, seq, source: 'linear', kind: 'mention', conversation: 'linear:uuid-1', title: 'ENG-1: Fix login', threadId: 'th-1',
+  author: 'Asha', trusted: true, body: 'please fix', ...extra,
 });
+
+const MAIN: Agent = { id: 'main', secret: 'm' };
 
 /** A stand-in for mahamantri's bridge API with the same attachment rules. */
 class FakeBridge {
@@ -72,7 +75,7 @@ class FakeBridge {
     const held = () => attachment !== this.holder || !this.holder;
     if (req.method === 'POST' && url.pathname === '/v1/attach') {
       if (body.agent && body.secret === 'stale') return send(403, { error: 'stale secret' });
-      if (this.holderLive && !body.takeover && !body.agent) return send(409, { error: 'held' });
+      if (!body.agent) return send(409, { error: 'not an agent' });
       this.holder = `att-${++this.gen}`;
       this.holderLive = true;
       return send(200, { attachment: this.holder, generation: this.gen });
@@ -112,14 +115,15 @@ class FakeBridge {
   }
 }
 
-async function setup(t: TestContext, opts: { start?: boolean; bridge?: FakeBridge; mainDirectory?: string; agent?: Agent } = {}) {
+async function setup(t: TestContext, opts: { start?: boolean; bridge?: FakeBridge; agent?: Agent | null } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'samrajya-channel-'));
   const discoveryPath = join(dir, 'bridge.json');
   const bridge = opts.bridge ?? new FakeBridge();
   await bridge.listen();
-  const writeDiscovery = () => writeFile(discoveryPath, JSON.stringify({ url: bridge.url, token: bridge.token, mainDirectory: opts.mainDirectory }));
+  const writeDiscovery = () => writeFile(discoveryPath, JSON.stringify({ url: bridge.url, token: bridge.token }));
   await writeDiscovery();
-  const channel = createChannel({ discoveryPath, directory: dir, pollSeconds: 1, heldRetryMs: 100, maxBackoffMs: 100, agent: opts.agent });
+  const agent = opts.agent === null ? undefined : opts.agent ?? MAIN;
+  const channel = createChannel({ discoveryPath, pollSeconds: 1, maxBackoffMs: 100, agent });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 'test', version: '0.0.1' });
   const notifications: Notification[] = [];
@@ -145,22 +149,27 @@ async function until(cond: () => boolean, what: string, ms = 5000) {
   }
 }
 
-test('the instructions are senapati/senapati.md', async () => {
-  const role = await readFile(fileURLToPath(new URL('../../../../senapati/senapati.md', import.meta.url)), 'utf8');
-  assert.equal(instructions, role.trimEnd());
+test('instructions explain the channel; a session that is no agent is told so', () => {
+  assert.match(instructions, /samrajya_reply in the event's conversation and thread/);
+  assert.match(notAnAgent, /not one of Samrajya's agents/);
 });
 
-test('renders a ping with its routing metadata and trust', () => {
+test('renders a message with its conversation, thread and trust', () => {
   const r = render(event('linear:c1', 1, { body: 'line one\nline two', url: 'https://linear.app/x' }));
-  assert.match(r.content, /Asha mentioned you on ENG-1 \("Fix login"\)/);
+  assert.match(r.content, /^Linear: Asha mentioned you in "ENG-1: Fix login"\./);
   assert.match(r.content, /> line one\n> line two/);
   assert.match(r.content, /samrajya_accept \(event_id linear:c1\)/);
-  assert.deepEqual(r.meta, { event_id: 'linear:c1', kind: 'mention', trusted: 'true', issue: 'ENG-1', thread_id: 'th-1' });
+  assert.match(r.content, /samrajya_reply in conversation linear:uuid-1, thread th-1/);
+  assert.deepEqual(r.meta, { event_id: 'linear:c1', kind: 'mention', trusted: 'true', source: 'linear', conversation: 'linear:uuid-1', thread_id: 'th-1' });
   for (const key of Object.keys(r.meta)) assert.match(key, /^[a-zA-Z_][a-zA-Z0-9_]*$/);
-  assert.equal(render(event('linear:c1', 1, { commentId: 'c1' })).meta.comment_id, 'c1');
   const untrusted = render(event('linear:c2', 2, { trusted: false, kind: 'reply' }));
   assert.match(untrusted.content, /replied in a thread you are part of.*NOT a trusted requester/);
   assert.equal(untrusted.meta.trusted, 'false');
+  const chat = render(event('telegram:7:11', 3, { source: 'telegram', kind: 'message', conversation: 'telegram:7', title: 'Chat with Asha',
+    threadId: '11', attachments: [{ kind: 'voice', ref: 'f1', seconds: 12 }] }));
+  assert.match(chat.content, /^Telegram: Asha wrote in "Chat with Asha"/);
+  assert.match(chat.content, /Attached: voice, 12s \(samrajya_fetch with event_id telegram:7:11 and ref f1/);
+  assert.match(chat.content, /conversation telegram:7, thread 11/);
 });
 
 test('declares a channel with the task tools and no permission relay', async (t) => {
@@ -169,8 +178,8 @@ test('declares a channel with the task tools and no permission relay', async (t)
   const names = (await client.listTools()).tools.map((x) => x.name);
   assert.deepEqual(names, ['samrajya_status', 'samrajya_accept', 'samrajya_create_task', 'samrajya_update_task',
     'samrajya_tasks', 'samrajya_reply', 'samrajya_action_intent', 'samrajya_action_result', 'samrajya_memory', 'samrajya_remember',
-    'samrajya_forget', 'samrajya_take_over']);
-  assert.match(client.getInstructions() ?? '', /You own outcomes/);
+    'samrajya_forget', 'samrajya_agents', 'samrajya_dispatch', 'samrajya_fetch', 'samrajya_message', 'samrajya_stop_agent']);
+  assert.match(client.getInstructions() ?? '', /Samrajya's channel/);
 });
 
 test('delivers pending and new pings once each', async (t) => {
@@ -201,23 +210,24 @@ test('tools send the attachment and map arguments; bridge errors come back as to
   const put = bridge.requests.find((r) => r.path === '/brain/deploys')!;
   assert.equal(put.method, 'PUT');
   assert.deepEqual(put.body, { description: 'Deploy rule', body: 'Ask first.' });
-  await call('samrajya_action_result', { action_id: 'A1', status: 'done', ref: 'cmt-1', thread_id: 'th-1', issue: 'ENG-1' });
-  assert.deepEqual(bridge.requests.find((r) => r.path === '/v1/actions/A1')!.body, { status: 'done', ref: 'cmt-1', threadId: 'th-1', issue: 'ENG-1' });
+  await call('samrajya_reply', { conversation: 'telegram:7', thread_id: '11', body: 'On it' });
+  assert.deepEqual(bridge.requests.find((r) => r.path === '/v1/reply')!.body, { conversation: 'telegram:7', threadId: '11', body: 'On it' });
+  await call('samrajya_dispatch', { brief: 'write the notes', conversation: 'telegram:7', route: false, links: ['ENG-1'] });
+  assert.deepEqual(bridge.requests.find((r) => r.path === '/v1/dispatch')!.body, { brief: 'write the notes', conversation: 'telegram:7', route: false, links: ['ENG-1'] });
+  await call('samrajya_fetch', { event_id: 'telegram:7:11', ref: 'f1' });
+  assert.deepEqual(bridge.requests.find((r) => r.path === '/v1/fetch')!.body, { eventId: 'telegram:7:11', ref: 'f1' });
 });
 
-test('stays passive while another session is attached, until it takes over', async (t) => {
+test('a session that is no agent receives nothing and cannot act', async (t) => {
   const bridge = new FakeBridge();
-  bridge.holder = 'att-other';
-  bridge.holderLive = true;
   bridge.events.push(event('linear:c1', 1));
-  const { notifications, call, channel } = await setup(t, { bridge });
-  await until(() => channel.state === 'passive', 'passive state');
-  const refused = await call('samrajya_accept', { event_ids: ['linear:c1'], task_id: 'T1', next_action: 'x' });
-  assert.equal(refused.isError, true);
-  assert.match(JSON.stringify(refused.content), /not the main one/);
+  const { notifications, call, channel, client } = await setup(t, { bridge, agent: null });
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(channel.state, 'not an agent');
   assert.equal(notifications.length, 0);
-  assert.equal((await call('samrajya_take_over')).isError, undefined);
-  await until(() => notifications.length === 1, 'delivery after take over');
+  assert.ok(!bridge.requests.some((r) => r.path === '/v1/attach'));
+  assert.deepEqual((await client.listTools()).tools.map((x) => x.name), ['samrajya_status', 'samrajya_memory']);
+  assert.equal((await call('samrajya_status')).isError, undefined);
 });
 
 test('releases the attachment when it stops, so the next session attaches at once', async (t) => {
@@ -226,46 +236,6 @@ test('releases the attachment when it stops, so the next session attaches at onc
   await channel.stop();
   assert.ok(bridge.requests.some((r) => r.path === '/v1/detach' && r.attachment === 'att-1'));
   assert.equal(bridge.holderLive, false);
-});
-
-test('only a session in the main directory attaches by itself', async (t) => {
-  const bridge = new FakeBridge();
-  bridge.events.push(event('linear:c1', 1));
-  const { notifications, channel, call } = await setup(t, { bridge, mainDirectory: tmpdir() });
-  await until(() => channel.state === 'elsewhere', 'elsewhere state');
-  assert.equal(bridge.requests.filter((r) => r.path === '/v1/attach').length, 0);
-  assert.equal(notifications.length, 0);
-  assert.equal((await call('samrajya_take_over')).isError, undefined); // still possible when asked
-  await until(() => notifications.length === 1, 'delivery after explicit take over');
-});
-
-test('a session in the main directory attaches', async (t) => {
-  const bridge = new FakeBridge();
-  bridge.events.push(event('linear:c1', 1));
-  const dir = await mkdtemp(join(tmpdir(), 'samrajya-main-'));
-  t.after(() => rm(dir, { recursive: true, force: true }));
-  const discoveryPath = join(dir, 'bridge.json');
-  await bridge.listen();
-  t.after(() => bridge.close());
-  await writeFile(discoveryPath, JSON.stringify({ url: bridge.url, token: bridge.token, mainDirectory: dir }));
-  const channel = createChannel({ discoveryPath, directory: dir, pollSeconds: 1, heldRetryMs: 100 });
-  t.after(() => channel.stop());
-  channel.start();
-  await until(() => bridge.requests.some((r) => r.path === '/v1/attach'), 'attach in main directory');
-});
-
-test('a session marked main attaches wherever it runs (opencode)', async (t) => {
-  const bridge = new FakeBridge();
-  await bridge.listen();
-  t.after(() => bridge.close());
-  const dir = await mkdtemp(join(tmpdir(), 'samrajya-oc-'));
-  t.after(() => rm(dir, { recursive: true, force: true }));
-  const discoveryPath = join(dir, 'bridge.json');
-  await writeFile(discoveryPath, JSON.stringify({ url: bridge.url, token: bridge.token, mainDirectory: '/somewhere/else' }));
-  const channel = createChannel({ discoveryPath, directory: dir, main: true, pollSeconds: 1 });
-  t.after(() => channel.stop());
-  channel.start();
-  await until(() => bridge.requests.some((r) => r.path === '/v1/attach'), 'attach when marked main');
 });
 
 test('re-reads the discovery file after mahamantri restarts with a new token, without re-sending', async (t) => {
@@ -302,10 +272,11 @@ test('the bundled plugin server starts over stdio and delivers a ping', { timeou
   const dir = await mkdtemp(join(tmpdir(), 'samrajya-channel-'));
   const discoveryPath = join(dir, 'bridge.json');
   await writeFile(discoveryPath, JSON.stringify({ url: bridge.url, token: bridge.token }));
+  await writeFile(join(dir, 'main.secret'), 'm');
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [fileURLToPath(new URL('../../plugin/server.mjs', import.meta.url))],
-    env: { SAMRAJYA_BRIDGE_FILE: discoveryPath },
+    env: { SAMRAJYA_BRIDGE_FILE: discoveryPath, SAMRAJYA_AGENT: 'main', SAMRAJYA_AGENT_SECRET_FILE: join(dir, 'main.secret') },
     stderr: 'pipe',
   });
   const client = new Client({ name: 'stdio-test', version: '0.0.1' });
@@ -326,50 +297,50 @@ test('renders a notice from Samrajya as needing no task', () => {
   assert.deepEqual(r.meta, { event_id: 'samrajya:resume-1', kind: 'limit_reset', trusted: 'true' });
 });
 
-test('the StopFailure hook reports only the main session hitting its usage limit', { timeout: 20000 }, async (t) => {
+test('the StopFailure hook reports an agent hitting the usage limit, and nothing else', { timeout: 20000 }, async (t) => {
   const bridge = new FakeBridge();
   await bridge.listen();
   const dir = await mkdtemp(join(tmpdir(), 'samrajya-hook-'));
   const discoveryPath = join(dir, 'bridge.json');
-  await writeFile(discoveryPath, JSON.stringify({ url: bridge.url, token: bridge.token, mainDirectory: dir }));
+  await writeFile(discoveryPath, JSON.stringify({ url: bridge.url, token: bridge.token }));
+  await writeFile(join(dir, 'w.secret'), 's3');
   t.after(async () => {
     await bridge.close();
     await rm(dir, { recursive: true, force: true });
   });
-  const hook = (input: object) => new Promise<number>((resolve) => {
+  const hook = (input: object, env: Record<string, string> = {}) => new Promise<number>((resolve) => {
     const child = spawn(process.execPath, [fileURLToPath(new URL('../../plugin/server.mjs', import.meta.url)), '--stop-failure'],
-      { env: { ...process.env, SAMRAJYA_BRIDGE_FILE: discoveryPath, SAMRAJYA_MAIN: '' }, stdio: ['pipe', 'ignore', 'ignore'] });
+      { env: { ...process.env, SAMRAJYA_BRIDGE_FILE: discoveryPath, SAMRAJYA_AGENT: '', ...env }, stdio: ['pipe', 'ignore', 'ignore'] });
     child.on('exit', (code) => resolve(code ?? -1));
     child.stdin.end(JSON.stringify(input));
   });
   const message = "You've hit your 5-hour limit · resets 7:10pm (UTC)";
-  assert.equal(await hook({ error: 'rate_limit', cwd: '/elsewhere', last_assistant_message: message }), 0);
-  assert.equal(await hook({ error: 'overloaded', cwd: dir, last_assistant_message: 'busy' }), 0);
+  const agent = { SAMRAJYA_AGENT: 'w-T3', SAMRAJYA_AGENT_SECRET_FILE: join(dir, 'w.secret') };
+  assert.equal(await hook({ error: 'rate_limit', last_assistant_message: message }), 0);
+  assert.equal(await hook({ error: 'overloaded', last_assistant_message: 'busy' }, agent), 0);
   assert.equal(bridge.requests.filter((r) => r.path === '/v1/limit').length, 0);
-  assert.equal(await hook({ error: 'rate_limit', cwd: dir, last_assistant_message: message, error_details: '429' }), 0);
-  assert.deepEqual(bridge.requests.find((r) => r.path === '/v1/limit')?.body, { message, details: '429' });
+  assert.equal(await hook({ error: 'rate_limit', last_assistant_message: message, error_details: '429' }, agent), 0);
+  assert.deepEqual(bridge.requests.find((r) => r.path === '/v1/limit')?.body, { message, details: '429', agent: 'w-T3', secret: 's3' });
 });
 
 test('an agent attaches with its id and secret wherever it runs, and has its role\'s tools', async (t) => {
-  const { bridge, channel, client, notifications } = await setup(t, { mainDirectory: '/somewhere/else', agent: { id: 'w-T3', secret: 's3' } });
+  const { bridge, channel, client, notifications } = await setup(t, { agent: { id: 'w-T3', secret: 's3' } });
   await until(() => channel.state === 'attached', 'attached');
   const attach = bridge.requests.find((r) => r.path === '/v1/attach');
-  assert.deepEqual({ ...attach?.body, client: undefined }, { client: undefined, agent: 'w-T3', secret: 's3', protocol: 2 });
+  assert.deepEqual({ ...attach?.body, client: undefined }, { client: undefined, agent: 'w-T3', secret: 's3', protocol: 3 });
   bridge.push(event('linear:c9', 9));
   await until(() => notifications.length === 1, 'the ping');
   const names = (await client.listTools()).tools.map((x) => x.name);
-  assert.ok(names.includes('samrajya_report') && names.includes('samrajya_reply'));
-  assert.ok(!names.includes('samrajya_dispatch') && !names.includes('samrajya_take_over') && !names.includes('samrajya_create_task'));
+  assert.ok(names.includes('samrajya_report') && names.includes('samrajya_reply') && names.includes('samrajya_fetch'));
+  assert.ok(!names.includes('samrajya_dispatch') && !names.includes('samrajya_create_task'));
   const r = await client.callTool({ name: 'samrajya_dispatch', arguments: { brief: 'x' } });
   assert.equal(r.isError, true);
 });
 
-test('the main agent can dispatch and see the agents; legacy sessions keep their tools', () => {
+test('the main agent can dispatch and see the agents', () => {
   const main = toolsFor({ id: 'main', secret: 'x' }).map((x) => x.name);
-  for (const name of ['samrajya_dispatch', 'samrajya_agents', 'samrajya_message', 'samrajya_stop_agent']) assert.ok(main.includes(name), name);
-  assert.ok(!main.includes('samrajya_take_over'));
-  const legacy = toolsFor().map((x) => x.name);
-  assert.ok(legacy.includes('samrajya_take_over') && !legacy.includes('samrajya_dispatch'));
+  for (const name of ['samrajya_dispatch', 'samrajya_agents', 'samrajya_message', 'samrajya_stop_agent', 'samrajya_fetch']) assert.ok(main.includes(name), name);
+  assert.ok(!main.includes('samrajya_report'));
 });
 
 test('a replaced agent session stops acting', async (t) => {
@@ -389,12 +360,12 @@ test('an agent reads its identity from the environment its launcher set', async 
   assert.equal(await agentFromEnv({}), undefined);
 });
 
-test('the turn hooks report an agent\'s turns, and nothing in legacy mode', { timeout: 20000 }, async (t) => {
+test('the turn hooks report an agent\'s turns, and nothing for a session that is no agent', { timeout: 20000 }, async (t) => {
   const bridge = new FakeBridge();
   await bridge.listen();
   const dir = await mkdtemp(join(tmpdir(), 'samrajya-turn-'));
   const discoveryPath = join(dir, 'bridge.json');
-  await writeFile(discoveryPath, JSON.stringify({ url: bridge.url, token: bridge.token, mainDirectory: dir }));
+  await writeFile(discoveryPath, JSON.stringify({ url: bridge.url, token: bridge.token }));
   await writeFile(join(dir, 'w.secret'), 's3');
   t.after(async () => {
     await bridge.close();
@@ -406,7 +377,7 @@ test('the turn hooks report an agent\'s turns, and nothing in legacy mode', { ti
     child.on('exit', (code) => resolve(code ?? -1));
     child.stdin.end('{}');
   });
-  assert.equal(await hook('start', {}), 0);
+  assert.equal(await hook('start', { SAMRAJYA_AGENT: '' }), 0);
   assert.equal(bridge.requests.filter((r) => r.path === '/v1/turn').length, 0);
   assert.equal(await hook('start', { SAMRAJYA_AGENT: 'w-T3', SAMRAJYA_AGENT_SECRET_FILE: join(dir, 'w.secret') }), 0);
   assert.equal(await hook('end', { SAMRAJYA_AGENT: 'w-T3', SAMRAJYA_AGENT_SECRET_FILE: join(dir, 'w.secret') }), 0);

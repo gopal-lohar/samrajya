@@ -1,5 +1,5 @@
 {
   "name": "samrajya",
-  "version": "0.2.0",
-  "description": "Connects Claude Code sessions to Samrajya: feeds each its Linear pings and messages from mahamantri's durable inbox, and keeps their tasks and action journal"
+  "version": "0.3.0",
+  "description": "Connects Claude Code sessions to Samrajya: feeds each agent the messages routed to it from mahamantri's durable inbox (Linear, Telegram, ...), and gives it tools for its tasks, replies and the action journal"
 }

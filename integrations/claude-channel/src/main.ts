@@ -9,7 +9,6 @@ import { reportStopFailure, reportTurn } from './hook.js';
 const discoveryPath = process.env.SAMRAJYA_BRIDGE_FILE ||
   join(process.env.XDG_STATE_HOME || join(homedir(), '.local', 'state'), 'samrajya', 'bridge.json');
 
-const main = process.env.SAMRAJYA_MAIN === '1';
 const agent = await agentFromEnv();
 
 if (process.argv[2] === '--stop-failure') {
@@ -17,7 +16,7 @@ if (process.argv[2] === '--stop-failure') {
   let raw = '';
   for await (const chunk of process.stdin) raw += chunk;
   try {
-    await reportStopFailure(JSON.parse(raw), new Bridge(discoveryPath), main, agent);
+    await reportStopFailure(JSON.parse(raw), new Bridge(discoveryPath), agent);
   } catch (error) {
     console.error(`samrajya: could not report the usage limit: ${error instanceof Error ? error.message : error}`);
   }
@@ -35,7 +34,7 @@ if (process.argv[2] === '--turn') {
   process.exit(0);
 }
 
-const channel = createChannel({ discoveryPath, main, agent });
+const channel = createChannel({ discoveryPath, agent });
 channel.mcp.oninitialized = () => channel.start();
 let stopping = false;
 async function stop() {
