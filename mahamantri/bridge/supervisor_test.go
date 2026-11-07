@@ -119,7 +119,7 @@ func (r *rig) keepAlive() {
 }
 
 func (r *rig) ping(issue, comment string) string {
-	r.s.Ingest(issuePing(issue, "uuid-"+issue, comment, comment), "")
+	r.s.ingestPing(issuePing(issue, "uuid-"+issue, comment, comment), "")
 	e, _ := r.s.Store.Event("linear:" + comment)
 	return e.Owner()
 }
@@ -317,7 +317,7 @@ func TestSupervisorWaitsForSessionsToReattachAfterARestart(t *testing.T) {
 	r.attach(MainAgent)
 	r.attach(w)
 	// A new server and supervisor over the same store: no attachments.
-	s2 := &Server{Store: r.s.Store, Token: "tok", Logger: log.New(io.Discard, "", 0), Agents: true, now: r.s.now}
+	s2 := &Server{Store: r.s.Store, Token: "tok", Logger: log.New(io.Discard, "", 0), now: r.s.now}
 	r.sv = &Supervisor{Store: r.s.Store, Server: s2, Launcher: r.l, Logger: log.New(io.Discard, "", 0), MaxWorkers: 2, now: r.s.now}
 	r.tick()
 	r.advance(time.Minute)
@@ -399,7 +399,7 @@ func TestAPingWaitingForASlotSaysSo(t *testing.T) {
 	r.s.Store.AcceptAs(w2, []string{"linear:c2"}, mustAgent(t, r, w2).TaskID, nil, "x")
 	r.advance(16 * time.Minute)
 	r.keepAlive()
-	r.s.nudge(context.Background(), 15*time.Minute)
+	r.s.nudge(context.Background())
 	_, _, cm := r.fake.got()
 	if len(cm) != 1 || !strings.HasPrefix(cm[0], "uuid-ENG-3 c3 ") || !strings.Contains(cm[0], "next in line") {
 		t.Errorf("nudges %v", cm)

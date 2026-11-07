@@ -8,13 +8,14 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gopal-lohar/samrajya/mahamantri/brain"
-	"github.com/gopal-lohar/samrajya/mahamantri/linear"
 )
 
 const (
@@ -26,34 +27,32 @@ const (
 )
 
 // Server is the local API between mahamantri and the Samrajya channel plugin
-// running inside the main session. Every request carries the bearer token
-// mahamantri wrote to its discovery file. One plugin instance at a time is
-// attached - the main session's - and only it may read the event feed or
-// change state; another (a second session with the plugin loaded) is
-// refused until the first goes quiet or is explicitly taken over.
+// running in each agent's session. Every request carries the bearer token
+// mahamantri wrote to its discovery file. A session attaches as its agent
+// with the secret of the agent's current launch; a session that cannot is
+// read-only, and a launch that was replaced can no longer act.
 //
-// Server is also the webhook's linear.Sink: it stores a ping and wakes the
-// feed.
+// Server is also where surfaces deliver: Receive stores a message and wakes
+// the feeds.
 type Server struct {
 	Store  *Store
 	Token  string
 	Logger *log.Logger
 	// Brain, if set, is served under /brain (see brain.Routes): any client
-	// may read it, only the attached one change it.
+	// may read it, only an attached agent change it.
 	Brain *brain.Store
-	// Linear, if set, acts on Linear as Senapati: it reacts to each new ping
-	// with Received once it is stored, and Watch keeps Senapati's status
-	// and nudges about pings left waiting.
-	Linear   Linear
-	Received string
+	// Surfaces are where messages come from and replies go, by name (see
+	// AddSurface).
+	Surfaces map[string]Surface
+	// Home is the conversation where Samrajya tells the person about
+	// itself (a stuck main session); empty: only the log.
+	Home string
+	// FilesDir is where files fetched from surfaces for agents are saved.
+	FilesDir string
 
-	// Agents turns on agents mode (docs/design/agents.md): each session
-	// attaches as its agent, with the secret its launcher gave it, and
-	// nothing attaches by being first. Off, one session attaches as the main
-	// one, as before agents.
-	Agents bool
-	// Supervisor, in agents mode, stops agents for the main
-	// (samrajya_stop_agent).
+	// Supervisor stops agents for the main (samrajya_stop_agent) and says
+	// how long the queue for a free slot is. Nil when mahamantri launches
+	// no sessions (mode opencode).
 	Supervisor interface {
 		StopAgent(ctx context.Context, id string) error
 		Queued(agent string) (ahead int, queued bool)
@@ -98,32 +97,18 @@ func (s *Server) init() {
 	}
 }
 
-// Linear is what the server does on Linear itself (linear.API).
-type Linear interface {
-	React(ctx context.Context, commentID, emoji string) error
-	SetStatus(ctx context.Context, emoji, label string) error
-	Comment(ctx context.Context, issue, parentID, body string) (linear.Posted, error)
-	Handle(ctx context.Context, userID string) (string, error)
-}
-
-// Ingest stores a ping and wakes any waiting feed request. A new ping gets
-// the Received reaction, so the person sees at once that it arrived even
-// while the main session is busy or offline; that is best effort and never
-// fails the ingest.
-func (s *Server) Ingest(p linear.Ping, delivery string) error {
-	created, err := s.Store.IngestNew(p, delivery)
+// Receive stores a message from a surface and wakes the feeds. A new
+// message is marked received on its surface, so its author sees at once
+// that it arrived even while nobody can answer; that is best effort and
+// never fails the receipt.
+func (s *Server) Receive(in Inbound) error {
+	created, err := s.Store.Ingest(in)
 	if err != nil {
 		return err
 	}
 	s.Wake()
-	if created && s.Linear != nil && s.Received != "" && p.CommentID != "" {
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			if err := s.Linear.React(ctx, p.CommentID, s.Received); err != nil {
-				s.Logger.Printf("linear: could not react to comment %s: %v", p.CommentID, err)
-			}
-		}()
+	if created {
+		s.markReceived(in)
 	}
 	return nil
 }
@@ -137,8 +122,8 @@ func (s *Server) Wake() {
 	s.mu.Unlock()
 }
 
-// Attachment describes who is attached as an agent, for status.
-type Attachment struct {
+// AttachInfo describes who is attached as an agent, for status.
+type AttachInfo struct {
 	Agent      string    `json:"agent"`
 	Client     string    `json:"client,omitempty"`
 	Generation uint64    `json:"generation"`
@@ -147,12 +132,12 @@ type Attachment struct {
 }
 
 // attachmentOf describes agent's attachment; call with s.mu held.
-func (s *Server) attachmentOf(agent string) Attachment {
+func (s *Server) attachmentOf(agent string) AttachInfo {
 	a := s.atts[agent]
 	if a == nil {
-		return Attachment{Agent: agent}
+		return AttachInfo{Agent: agent}
 	}
-	return Attachment{Agent: agent, Client: a.client, Generation: a.gen, LastSeen: a.lastSeen, Live: a.live(s.now())}
+	return AttachInfo{Agent: agent, Client: a.client, Generation: a.gen, LastSeen: a.lastSeen, Live: a.live(s.now())}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -215,6 +200,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.turn(w, r)
 	case r.Method == http.MethodPost && path == "/v1/reply":
 		s.withAgent(w, r, s.reply)
+	case r.Method == http.MethodPost && path == "/v1/fetch":
+		s.withAgent(w, r, s.fetch)
 	case r.Method == http.MethodGet && path == "/v1/agents":
 		s.agents(w)
 	case r.Method == http.MethodPost && path == "/v1/dispatch":
@@ -227,7 +214,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.withAgent(w, r, mainOnly(func(w http.ResponseWriter, r *http.Request, _ string) {
 			id := strings.TrimSuffix(strings.TrimPrefix(path, "/v1/agents/"), "/stop")
 			if s.Supervisor == nil {
-				writeErr(w, http.StatusNotImplemented, "agents mode is off")
+				writeErr(w, http.StatusNotImplemented, "mahamantri launches no sessions here (mode opencode)")
 				return
 			}
 			reply(w, map[string]any{"stopped": id}, s.Supervisor.StopAgent(r.Context(), id))
@@ -267,25 +254,17 @@ func mainOnly(next agentHandler) agentHandler {
 	}
 }
 
-// ProtocolVersion is the plugin protocol this mahamantri serves. A plugin
-// that sends none is from before agents and is served in legacy mode only.
-const ProtocolVersion = 2
+// ProtocolVersion is the plugin protocol this mahamantri serves.
+const ProtocolVersion = 3
 
-// attach attaches the caller as an agent.
-//
-// Agents mode: the caller names its agent and gives the secret of the
-// agent's current launch; anything else is refused (and stays read-only). A
-// launch's secret is replaced on the next launch, so a replaced session can
-// no longer attach or act. The agent's earlier attachment, if any, is
-// replaced: it is the same session reconnecting.
-//
-// Legacy mode: the caller becomes the main session when nobody is attached,
-// when the holder has gone quiet, or with takeover - which a session does
-// only when the person says this one is now the main.
+// attach attaches the caller as an agent. It names its agent and gives the
+// secret of the agent's current launch; anything else is refused (and stays
+// read-only). A launch's secret is replaced on the next launch, so a
+// replaced session can no longer attach or act. The agent's earlier
+// attachment, if any, is replaced: it is the same session reconnecting.
 func (s *Server) attach(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Client   string `json:"client"`
-		Takeover bool   `json:"takeover"`
 		Agent    string `json:"agent"`
 		Secret   string `json:"secret"`
 		Protocol int    `json:"protocol"`
@@ -293,51 +272,34 @@ func (s *Server) attach(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &body) {
 		return
 	}
-	agent, secret := MainAgent, ""
-	if s.Agents {
-		if body.Agent == "" || body.Secret == "" {
-			writeErr(w, http.StatusConflict, "this session is not one of Samrajya's agents (no agent id), so it is read-only")
-			return
-		}
-		if body.Protocol != ProtocolVersion {
-			writeErr(w, http.StatusUpgradeRequired, fmt.Sprintf("plugin protocol %d; this mahamantri serves %d - update the plugin", body.Protocol, ProtocolVersion))
-			return
-		}
-		a, err := s.Store.Agent(body.Agent)
-		if err != nil || a.Secret == "" || subtle.ConstantTimeCompare([]byte(a.Secret), []byte(body.Secret)) != 1 {
-			writeErr(w, http.StatusForbidden, "unknown agent or stale secret: this session has been replaced or stopped")
-			return
-		}
-		agent, secret = a.ID, a.Secret
-	} else if body.Agent != "" && body.Agent != MainAgent {
-		writeErr(w, http.StatusConflict, "agents mode is off: only the main session attaches")
+	if body.Agent == "" || body.Secret == "" {
+		writeErr(w, http.StatusConflict, "this session is not one of Samrajya's agents (no agent id), so it is read-only")
 		return
 	}
+	if body.Protocol != ProtocolVersion {
+		writeErr(w, http.StatusUpgradeRequired, fmt.Sprintf("plugin protocol %d; this mahamantri serves %d - update the plugin", body.Protocol, ProtocolVersion))
+		return
+	}
+	a, err := s.Store.Agent(body.Agent)
+	if err != nil || a.Secret == "" || subtle.ConstantTimeCompare([]byte(a.Secret), []byte(body.Secret)) != 1 {
+		writeErr(w, http.StatusForbidden, "unknown agent or stale secret: this session has been replaced or stopped")
+		return
+	}
+	agent, secret := a.ID, a.Secret
 	s.mu.Lock()
 	s.init()
-	if cur := s.atts[agent]; !s.Agents && cur.live(s.now()) && !body.Takeover {
-		a := s.attachmentOf(agent)
-		s.mu.Unlock()
-		writeJSON(w, http.StatusConflict, map[string]any{
-			"error":    "another session is attached as the main session; take over only if the person says this one is now the main",
-			"attached": a,
-		})
-		return
-	}
 	s.seq++
 	att := &attachment{agent: agent, secret: secret, client: body.Client, gen: s.seq, lastSeen: s.now(), protocol: body.Protocol,
 		holder: fmt.Sprintf("%s-%d-%d", agent, s.seq, s.now().UnixNano())}
 	s.atts[agent] = att
 	s.mu.Unlock()
-	if s.Agents {
-		s.Store.UpdateAgent(agent, func(a *Agent) error {
-			if a.Secret == secret {
-				a.State, a.AttachedAt, a.Failures, a.Error = AgentLive, s.now(), 0, ""
-			}
-			return nil
-		})
-	}
-	s.Logger.Printf("bridge: %q attached as %s (attachment %d, takeover %v)", body.Client, agent, att.gen, body.Takeover)
+	s.Store.UpdateAgent(agent, func(a *Agent) error {
+		if a.Secret == secret {
+			a.State, a.AttachedAt, a.Failures, a.Error = AgentLive, s.now(), 0, ""
+		}
+		return nil
+	})
+	s.Logger.Printf("bridge: %q attached as %s (attachment %d)", body.Client, agent, att.gen)
 	writeJSON(w, http.StatusOK, map[string]any{"attachment": att.holder, "generation": att.gen, "agent": agent})
 }
 
@@ -355,8 +317,8 @@ func (s *Server) detach(w http.ResponseWriter, r *http.Request, agent string) {
 }
 
 // withAgent runs next for the agent the request's attachment belongs to,
-// refusing a request without one, and in agents mode one whose launch has
-// since been replaced.
+// refusing a request without one, or one whose launch has since been
+// replaced.
 func (s *Server) withAgent(w http.ResponseWriter, r *http.Request, next agentHandler) {
 	id := r.Header.Get("X-Samrajya-Attachment")
 	s.mu.Lock()
@@ -372,7 +334,7 @@ func (s *Server) withAgent(w http.ResponseWriter, r *http.Request, next agentHan
 	}
 	main := s.attachmentOf(MainAgent)
 	s.mu.Unlock()
-	if att != nil && s.Agents {
+	if att != nil {
 		if a, err := s.Store.Agent(att.agent); err != nil || a.Secret != att.secret {
 			s.mu.Lock()
 			if s.atts[att.agent] == att {
@@ -394,69 +356,74 @@ func (s *Server) withAgent(w http.ResponseWriter, r *http.Request, next agentHan
 	next(w, r, att.agent)
 }
 
-// reply posts a comment as Senapati for the main session, journaled: the
-// action is recorded before posting and resolved with the comment after, so
-// the comment's thread is known at once and a crash in between leaves it
-// uncertain rather than forgotten. A comment posted this way, rather than
-// through the session's Linear connector, is Senapati's whoever the
-// connector belongs to.
+// reply posts in a conversation through its surface, journaled: the action
+// is recorded before posting and resolved with what was posted after, so
+// the reply's thread is known at once and a crash in between leaves it
+// uncertain rather than forgotten. The main may reply anywhere; a worker
+// only in its task's conversations.
 func (s *Server) reply(w http.ResponseWriter, r *http.Request, agent string) {
 	var body struct {
-		TaskID   string `json:"taskId"`
-		Issue    string `json:"issue"`
-		ThreadID string `json:"threadId"`
-		Body     string `json:"body"`
+		TaskID       string `json:"taskId"`
+		Conversation string `json:"conversation"`
+		ThreadID     string `json:"threadId"`
+		Body         string `json:"body"`
 	}
 	if !decode(w, r, &body) {
 		return
 	}
-	switch {
-	case s.Linear == nil:
-		writeErr(w, http.StatusNotImplemented, "mahamantri has no Linear API key (linear.apiKey), so it cannot post")
+	if strings.TrimSpace(body.Body) == "" {
+		writeErr(w, http.StatusBadRequest, "body is required")
 		return
 	}
-	task, err := s.Store.MayReply(agent, body.Issue)
+	conv, err := s.canonical(r.Context(), body.Conversation)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	conv, task, err := s.Store.MayReply(agent, conv)
 	if err != nil {
 		reply(w, nil, err)
 		return
 	}
-	if body.Issue == "" {
-		body.Issue = task.Issue // a worker's own issue
+	sf, err := s.surface(conv)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
 	}
 	if body.TaskID == "" {
 		body.TaskID = task.ID
 	}
-	if body.Issue == "" || strings.TrimSpace(body.Body) == "" {
-		writeErr(w, http.StatusBadRequest, "issue and body are required")
-		return
+	if body.ThreadID == "" && agent != MainAgent && slices.Contains(task.Conversations, conv) {
+		body.ThreadID = task.ThreadID
 	}
-	target := body.Issue
+	target := conv
 	if body.ThreadID != "" {
 		target += " thread " + body.ThreadID
 	}
-	a, err := s.Store.IntendAs(agent, Action{TaskID: body.TaskID, Kind: "linear_comment", Target: target, Intent: truncate(body.Body, 200)})
+	a, err := s.Store.IntendAs(agent, Action{TaskID: body.TaskID, Kind: sf.Name() + "_reply", Target: target, Intent: truncate(body.Body, 200)})
 	if err != nil {
 		reply(w, nil, err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
-	posted, err := s.Linear.Comment(ctx, body.Issue, body.ThreadID, body.Body)
+	posted, err := sf.Deliver(ctx, conv, body.ThreadID, body.Body)
 	if err != nil {
-		// The comment may or may not exist (a timeout, say): leave the
-		// action unresolved, to be checked on Linear before retrying.
-		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error() + " - check the thread on Linear before posting again", "actionId": a.ID})
+		// It may or may not have been posted (a timeout, say): leave the
+		// action unresolved, to be checked before posting again.
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error() + " - check the conversation before posting again", "actionId": a.ID})
 		return
 	}
-	if _, err := s.Store.Resolve(a.ID, Happened, posted.ID, "", posted.ThreadID, posted.Issue); err != nil {
-		s.Logger.Printf("bridge: posted comment %s but could not record it: %v", posted.ID, err)
+	if _, err := s.Store.Resolve(a.ID, Happened, posted.ID, "", posted.Thread, conv); err != nil {
+		s.Logger.Printf("bridge: posted %s but could not record it: %v", posted.ID, err)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"commentId": posted.ID, "threadId": posted.ThreadID, "issue": posted.Issue, "url": posted.URL, "actionId": a.ID})
+	writeJSON(w, http.StatusOK, map[string]any{"id": posted.ID, "conversation": conv, "threadId": posted.Thread, "url": posted.URL, "actionId": a.ID})
 }
 
-// Status is Senapati's Linear status. It says something only when
-// something is wrong: no main session, or a task waiting on the person.
-// Otherwise it is clear.
+// Status is the assistant's state as surfaces that can show one show it
+// (StatusShower). It says something only when something is wrong: no main
+// session, the usage limit, or a task waiting on the person. Otherwise it is
+// empty.
 type Status struct{ Emoji, Label string }
 
 var offline = Status{"💤", "Offline - pings wait until I'm back"}
@@ -471,8 +438,8 @@ func (s *Server) currentStatus() Status {
 	if rec, err := s.Store.Recovery(); err == nil {
 		for _, t := range rec.Open {
 			if t.Status == Blocked || t.Status == WaitingApproval {
-				if t.Issue != "" {
-					return Status{"⚠️", "Blocked on " + t.Issue + " - needs you"}
+				if t.Title != "" {
+					return Status{"⚠️", "Blocked on " + truncate(t.Title, 60) + " - needs you"}
 				}
 				return Status{"⚠️", "Blocked - needs you"}
 			}
@@ -493,33 +460,36 @@ func (s *Server) AgentLive(agent string) bool {
 }
 
 // Watch runs until ctx ends, checking every interval: it wakes the main
-// session once its usage limit has reset, and with a Linear key keeps
-// Senapati's Linear status at currentStatus and tells the person about a
-// ping still unaccepted nudgeAfter after it arrived - mentioning its author,
-// saying why it waits, once per thread and reason - so a ping never sits
-// silently while the session is offline, busy or at its usage limit. What
-// fails is retried at the next check. On the way out it leaves the status
-// offline.
-func (s *Server) Watch(ctx context.Context, every, nudgeAfter time.Duration) {
-	shown := Status{"?", "?"} // whatever an earlier run left: set it once
+// session once its usage limit has reset, shows the current Status on every
+// surface that can show one, and tells the author of a message still
+// unaccepted for its surface's NudgeAfter why it waits - on the message's own
+// surface, once per thread and reason - so nothing sits silently while a
+// session is offline, busy or at the usage limit. What fails is retried at
+// the next check. On the way out it shows offline.
+func (s *Server) Watch(ctx context.Context, every time.Duration) {
+	shown := map[string]Status{}
 	set := func(ctx context.Context, st Status) {
-		if st == shown || s.Linear == nil {
-			return
+		for name, sf := range s.Surfaces {
+			sh, ok := sf.(StatusShower)
+			if !ok {
+				continue
+			}
+			if cur, ok := shown[name]; ok && cur == st {
+				continue
+			}
+			if err := sh.ShowStatus(ctx, st); err != nil {
+				s.Logger.Printf("%s: could not show status %q: %v", name, st.Label, err)
+				continue
+			}
+			shown[name] = st
 		}
-		if err := s.Linear.SetStatus(ctx, st.Emoji, st.Label); err != nil {
-			s.Logger.Printf("linear: could not set status %q: %v", st.Label, err)
-			return
-		}
-		shown = st
 	}
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
 		s.wakeAfterLimit()
 		set(ctx, s.currentStatus())
-		if nudgeAfter > 0 && s.Linear != nil {
-			s.nudge(ctx, nudgeAfter)
-		}
+		s.nudge(ctx)
 		select {
 		case <-ctx.Done():
 			off, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -531,53 +501,65 @@ func (s *Server) Watch(ctx context.Context, every, nudgeAfter time.Duration) {
 	}
 }
 
-// nudgeQuiet is how long a thread that was told why its pings wait is not
-// told the same again.
+// nudgeQuiet is how long a thread that was told why its messages wait is
+// not told the same again.
 const nudgeQuiet = 6 * time.Hour
 
-func (s *Server) nudge(ctx context.Context, after time.Duration) {
+func (s *Server) nudge(ctx context.Context) {
 	pending, err := s.Store.Pending(0)
 	if err != nil {
 		return
 	}
 	for _, e := range pending {
-		if e.NudgedAt != nil || e.IssueID == "" || s.now().Sub(e.ReceivedAt) < after {
+		after := s.Store.policy(SurfaceOf(e.Conversation)).NudgeAfter
+		if e.NudgedAt != nil || e.Conversation == "" || !e.Trusted || after <= 0 || s.now().Sub(e.ReceivedAt) < after {
+			continue
+		}
+		sf, err := s.surface(e.Conversation)
+		if err != nil {
 			continue
 		}
 		reason, why := s.waitReason(e)
 		if reason == "" {
 			continue
 		}
-		// One comment per thread and reason: a second ping waiting for the
-		// same reason is covered by the first nudge.
-		key := "nudge:" + e.ThreadID
+		// One note per thread and reason: a second message waiting for the
+		// same reason is covered by the first.
+		key := "nudge:" + e.Conversation + "/" + e.ThreadID
 		if last := strings.SplitN(s.Store.Meta(key), "|", 2); len(last) == 2 && last[1] == reason {
 			if at, err := time.Parse(time.RFC3339, last[0]); err == nil && s.now().Sub(at) < nudgeQuiet {
 				s.Store.MarkNudged(e.ID)
 				continue
 			}
 		}
-		mention := ""
-		if e.AuthorID != "" {
-			if h, err := s.Linear.Handle(ctx, e.AuthorID); err == nil && h != "" {
-				mention = "@" + h + " "
-			}
-		}
-		if _, err := s.Linear.Comment(ctx, e.IssueID, e.ThreadID, mention+"I've received this. "+why); err != nil {
-			s.Logger.Printf("linear: could not nudge about %s: %v", e.ID, err)
+		if err := sf.Notify(ctx, e, "I've received this. "+why); err != nil {
+			s.Logger.Printf("%s: could not tell %s about %s: %v", sf.Name(), e.Author, e.ID, err)
 			continue
 		}
 		s.Store.SetMeta(key, s.now().Format(time.RFC3339)+"|"+reason)
 		if err := s.Store.MarkNudged(e.ID); err != nil {
 			s.Logger.Printf("bridge: nudged about %s but could not record it: %v", e.ID, err)
 		}
-		s.Logger.Printf("linear: nudged %s about %s waiting %s (%s)", e.Author, e.ID, s.now().Sub(e.ReceivedAt).Round(time.Minute), reason)
+		s.Logger.Printf("%s: told %s that %s waits (%s, %s)", sf.Name(), e.Author, e.ID, s.now().Sub(e.ReceivedAt).Round(time.Minute), reason)
 	}
 }
 
-// status is what an agent needs after a restart or compaction: its own
-// pending events, open tasks and unresolved actions (everyone's for the
-// main and for a caller that is not attached), and who is attached.
+// TellPerson says something about Samrajya itself in the Home
+// conversation, or only logs it when there is none.
+func (s *Server) TellPerson(ctx context.Context, text string) {
+	s.Logger.Printf("bridge: for the person: %s", text)
+	if s.Home == "" {
+		return
+	}
+	sf, err := s.surface(s.Home)
+	if err == nil {
+		_, err = sf.Deliver(ctx, s.Home, "", text)
+	}
+	if err != nil {
+		s.Logger.Printf("bridge: could not tell the person in %s: %v", s.Home, err)
+	}
+}
+
 // waitReason is why a ping is still waiting, for the note that tells the
 // person: a short key (one note per thread and key) and the sentence. An
 // empty key means say nothing (the person was told otherwise).
@@ -586,7 +568,7 @@ func (s *Server) waitReason(e Event) (string, string) {
 		return "limit " + until.Format(time.RFC3339), "I'm at my usage limit until " + untilText(until) + ". It's queued, and I'll pick it up then."
 	}
 	owner := e.Owner()
-	if owner == MainAgent || !s.Agents {
+	if owner == MainAgent {
 		if !s.Live() {
 			return "offline", "I'm offline right now. It's queued, and I'll pick it up as soon as I'm back."
 		}
@@ -612,10 +594,13 @@ func (s *Server) waitReason(e Event) (string, string) {
 	case AgentStarting:
 		return "starting", "I'm starting a session for it; it'll pick this up in a moment."
 	default:
-		return "busy", "I'm in the middle of a step on this issue's work, and I'll read this as soon as that step ends."
+		return "busy", "I'm in the middle of a step on this work, and I'll read this as soon as that step ends."
 	}
 }
 
+// status is what an agent needs after a restart or compaction: its own
+// pending events, open tasks and unresolved actions (everyone's for the
+// main and for a caller that is not attached), and where it can reply.
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.init()
@@ -638,7 +623,9 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	out := map[string]any{"attached": main, "you": me, "agentsMode": s.Agents, "recovery": rec}
+	names := s.surfaceNames()
+	sort.Strings(names)
+	out := map[string]any{"main": main, "you": me, "surfaces": names, "recovery": rec}
 	if s.Brain != nil {
 		out["brainIndex"] = s.Brain.Index()
 	}
@@ -681,11 +668,9 @@ func (s *Server) WaitPendingFor(ctx context.Context, agent string, after uint64,
 func (s *Server) events(w http.ResponseWriter, r *http.Request, agent string) {
 	after, _ := strconv.ParseUint(r.URL.Query().Get("after"), 10, 64)
 	wait, _ := time.ParseDuration(r.URL.Query().Get("wait") + "s")
-	if s.Agents {
-		// Events the launch brief carried are not sent again.
-		if a, err := s.Store.Agent(agent); err == nil {
-			after = max(after, a.BriefSeq)
-		}
+	// Events the launch brief carried are not sent again.
+	if a, err := s.Store.Agent(agent); err == nil {
+		after = max(after, a.BriefSeq)
 	}
 	pending, err := s.WaitPendingFor(r.Context(), agent, after, min(wait, maxWait))
 	switch {

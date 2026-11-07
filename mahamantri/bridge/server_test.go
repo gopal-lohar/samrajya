@@ -25,6 +25,7 @@ func newServer(t *testing.T) (*Server, *httptest.Server) {
 	s := &Server{Store: store, Token: "tok", Logger: log.New(io.Discard, "", 0)}
 	ts := httptest.NewServer(s)
 	t.Cleanup(ts.Close)
+	servers.Store(ts.URL, s)
 	return s, ts
 }
 
@@ -50,14 +51,6 @@ func (c *client) do(method, path string, body any) (int, map[string]any) {
 	return resp.StatusCode, out
 }
 
-func (c *client) attach(takeover bool) int {
-	code, out := c.do("POST", "/v1/attach", map[string]any{"client": "test", "takeover": takeover})
-	if code == http.StatusOK {
-		c.attachment = out["attachment"].(string)
-	}
-	return code
-}
-
 func TestAPIRequiresTheTokenAndNoBrowser(t *testing.T) {
 	_, ts := newServer(t)
 	for _, tok := range []string{"", "wrong"} {
@@ -81,18 +74,18 @@ func TestAPIRequiresTheTokenAndNoBrowser(t *testing.T) {
 	}
 }
 
-func TestOnlyTheAttachedSessionMayReadOrChangeState(t *testing.T) {
-	s, ts := newServer(t)
+func TestOnlyAnAttachedAgentMayReadOrChangeState(t *testing.T) {
+	_, ts := newServer(t)
 	main := &client{t: t, url: ts.URL, token: "tok"}
 	other := &client{t: t, url: ts.URL, token: "tok"}
 	if code, _ := other.do("POST", "/v1/tasks", NewTask{Title: "x"}); code != http.StatusConflict {
 		t.Errorf("unattached mutation: %d", code)
 	}
-	if main.attach(false) != http.StatusOK {
-		t.Fatal("first attach refused")
+	if code, _ := other.do("POST", "/v1/attach", map[string]any{"client": "x", "protocol": ProtocolVersion}); code != http.StatusConflict {
+		t.Errorf("a session that is no agent attached: %d", code)
 	}
-	if other.attach(false) != http.StatusConflict {
-		t.Fatal("second session attached over a live one")
+	if main.attach(false) != http.StatusOK {
+		t.Fatal("attach refused")
 	}
 	if code, _ := main.do("POST", "/v1/tasks", NewTask{Title: "x"}); code != http.StatusOK {
 		t.Errorf("attached mutation: %d", code)
@@ -100,32 +93,19 @@ func TestOnlyTheAttachedSessionMayReadOrChangeState(t *testing.T) {
 	if code, _ := other.do("GET", "/v1/status", nil); code != http.StatusOK {
 		t.Error("status is readable by any authenticated client")
 	}
-
-	if other.attach(true) != http.StatusOK {
-		t.Fatal("takeover refused")
+	// A relaunch of the main replaces the earlier session.
+	if other.attach(false) != http.StatusOK {
+		t.Fatal("relaunch refused")
 	}
 	if code, _ := main.do("GET", "/v1/events?wait=0", nil); code != http.StatusConflict {
 		t.Errorf("the replaced session still reads the feed: %d", code)
 	}
-
-	// A holder that detaches frees the attachment at once.
+	// A session that detaches can no longer act.
 	if code, _ := other.do("POST", "/v1/detach", nil); code != http.StatusOK {
 		t.Fatalf("detach: %d", code)
 	}
 	if code, _ := other.do("GET", "/v1/events?wait=0", nil); code != http.StatusConflict {
 		t.Errorf("a detached session still reads the feed: %d", code)
-	}
-	if main.attach(false) != http.StatusOK {
-		t.Fatal("could not attach after the holder detached")
-	}
-	other.attach(true)
-
-	// A holder that went quiet can be replaced without takeover.
-	s.mu.Lock()
-	s.atts[MainAgent].lastSeen = time.Now().Add(-2 * attachTTL)
-	s.mu.Unlock()
-	if main.attach(false) != http.StatusOK {
-		t.Error("could not attach after the holder went quiet")
 	}
 }
 
@@ -140,7 +120,7 @@ func TestFeedLongPollWakesOnIngestAndReplaysUntilAccepted(t *testing.T) {
 		got <- out["events"].([]any)
 	}()
 	time.Sleep(100 * time.Millisecond)
-	if err := s.Ingest(ping("c1", "c1"), "d1"); err != nil {
+	if err := s.ingestPing(ping("c1", "c1"), "d1"); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -194,8 +174,10 @@ func TestBrainIsServedReadableByAllWritableByTheMain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ts := httptest.NewServer(&Server{Store: store, Token: "tok", Brain: mem, Logger: log.New(io.Discard, "", 0)})
+	srv := &Server{Store: store, Token: "tok", Brain: mem, Logger: log.New(io.Discard, "", 0)}
+	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
+	servers.Store(ts.URL, srv)
 	main := &client{t: t, url: ts.URL, token: "tok"}
 	other := &client{t: t, url: ts.URL, token: "tok"}
 	note := map[string]string{"description": "Deploys need a heads-up", "body": "Tell the person before deploying."}

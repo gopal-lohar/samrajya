@@ -8,11 +8,10 @@ import (
 
 // hookAgent identifies the agent behind a hook request (turn start/end, a
 // usage limit): hooks run outside the plugin, so they carry the agent id and
-// secret from the session's environment rather than an attachment. In legacy
-// mode, or with no agent named, it is the main.
+// secret from the session's environment rather than an attachment.
 func (s *Server) hookAgent(agent, secret string) (string, bool) {
-	if !s.Agents || agent == "" {
-		return MainAgent, !s.Agents || agent == ""
+	if agent == "" || secret == "" {
+		return "", false
 	}
 	a, err := s.Store.Agent(agent)
 	if err != nil || a.Secret == "" || subtle.ConstantTimeCompare([]byte(a.Secret), []byte(secret)) != 1 {
@@ -40,11 +39,6 @@ func (s *Server) turn(w http.ResponseWriter, r *http.Request) {
 	agent, ok := s.hookAgent(body.Agent, body.Secret)
 	if !ok {
 		writeErr(w, http.StatusForbidden, "unknown agent or stale secret")
-		return
-	}
-	if _, err := s.Store.Agent(agent); err != nil {
-		// Legacy mode keeps no agent records.
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		return
 	}
 	_, err := s.Store.UpdateAgent(agent, func(a *Agent) error {
@@ -77,34 +71,41 @@ func (s *Server) agents(w http.ResponseWriter) {
 		}
 		out = append(out, v)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"agents": out, "agentsMode": s.Agents})
+	writeJSON(w, http.StatusOK, map[string]any{"agents": out})
 }
 
 // dispatch gives work to a worker of its own (the main only).
 func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, _ string) {
-	if !s.Agents {
-		writeErr(w, http.StatusNotImplemented, "agents mode is off: do the work in this session, or delegate to a background agent")
+	if s.Supervisor == nil {
+		writeErr(w, http.StatusNotImplemented, "this mahamantri launches no workers (mode opencode): do the work in this session")
 		return
 	}
 	var body struct {
-		Title    string `json:"title"`
-		Project  string `json:"project"`
-		Issue    string `json:"issue"`
-		IssueID  string `json:"issueId"`
-		ThreadID string `json:"threadId"`
-		Brief    string `json:"brief"`
+		Title        string   `json:"title"`
+		Brief        string   `json:"brief"`
+		Project      string   `json:"project"`
+		Conversation string   `json:"conversation"`
+		ThreadID     string   `json:"threadId"`
+		Route        *bool    `json:"route"`
+		Links        []string `json:"links"`
 	}
 	if !decode(w, r, &body) {
 		return
 	}
-	conv := ""
-	if body.IssueID != "" {
-		conv = "linear:" + body.IssueID
+	var err error
+	if body.Conversation, err = s.canonical(r.Context(), body.Conversation); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
 	}
-	if body.Title == "" {
-		body.Title = body.Issue
+	// By default a conversation is routed to the worker when its surface
+	// starts work by itself (an issue is a piece of work), and only
+	// reported in otherwise (the person's chat stays with the main).
+	route := body.Conversation != "" && s.Store.startsWork(SurfaceOf(body.Conversation))
+	if body.Route != nil {
+		route = *body.Route
 	}
-	t, err := s.Store.Dispatch(NewTask{Title: body.Title, Issue: body.Issue, ThreadID: body.ThreadID, Project: body.Project}, conv, body.Brief)
+	t, err := s.Store.Dispatch(NewTask{Title: body.Title, ThreadID: body.ThreadID, Project: body.Project, Links: body.Links},
+		body.Conversation, route, body.Brief)
 	if err == nil {
 		s.Wake()
 	}

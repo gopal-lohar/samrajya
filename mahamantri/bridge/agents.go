@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -14,7 +15,7 @@ import (
 )
 
 // Agents are the sessions Mahamantri runs (docs/design/agents.md): one main,
-// which talks to the person, and a worker per task. The store records which
+// which talks to the person, and a worker per dispatched task. The store records which
 // agent owns every event and task; the supervisor makes the agents exist.
 
 // MainAgent is the main session's agent id.
@@ -207,18 +208,25 @@ func (s *Store) TaskForConversation(conv string) (Task, error) {
 	return t, err
 }
 
-// Dispatch gives work to a worker of its own: a new task (or, when conv is
-// already linked to one, that task), with the main's brief as its first
-// event. It returns the task.
-func (s *Store) Dispatch(n NewTask, conv, brief string) (Task, error) {
+// Dispatch gives work to a worker of its own: a new task, with the main's
+// brief as its first event. With conv, the worker may reply there; with
+// route too, conv's new messages go to the worker, and when conv is already
+// routed to a task the work goes to that task (and its worker) instead.
+func (s *Store) Dispatch(n NewTask, conv string, route bool, brief string) (Task, error) {
 	if strings.TrimSpace(brief) == "" {
 		return Task{}, errors.New("say what the worker is to do (brief)")
+	}
+	if conv != "" && !strings.Contains(conv, ":") {
+		return Task{}, fmt.Errorf("conversation %q is not <surface>:<id>", conv)
+	}
+	if route && conv == "" {
+		return Task{}, errors.New("route needs a conversation")
 	}
 	var t Task
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		tasks := tx.Bucket(bTasks)
 		found := false
-		if conv != "" {
+		if route {
 			if id := tx.Bucket(bConvs).Get([]byte(conv)); id != nil {
 				if err := getJSON(tasks, string(id), &t); err != nil {
 					return err
@@ -227,26 +235,50 @@ func (s *Store) Dispatch(n NewTask, conv, brief string) (Task, error) {
 			}
 		}
 		if !found {
+			if strings.TrimSpace(n.Title) == "" {
+				n.Title = firstLine(brief, 80)
+			}
 			var err error
 			if t, err = newTask(tasks, n, s.now()); err != nil {
 				return err
 			}
 		}
-		if t.Agent == "" {
-			if err := s.assignWorker(tx, &t, conv); err != nil {
+		if t.Agent == "" || t.Agent == MainAgent {
+			if err := s.assignWorker(tx, &t, conv, route); err != nil {
+				return err
+			}
+		} else if conv != "" && !found {
+			if err := s.linkConversation(tx, &t, conv, route); err != nil {
 				return err
 			}
 		}
 		if !t.Open() {
-			t.Status, t.UpdatedAt = Queued, s.now()
-			if err := putJSON(tasks, t.ID, t); err != nil {
-				return err
+			t.Status = Queued
+		}
+		t.UpdatedAt = s.now()
+		if err := putJSON(tasks, t.ID, t); err != nil {
+			return err
+		}
+		where := ""
+		if conv != "" {
+			where = "\nReport in conversation " + conv
+			if n.ThreadID != "" {
+				where += ", thread " + n.ThreadID
 			}
+			where += " (samrajya_reply)."
 		}
 		return s.putNotice(tx, t.Agent, fmt.Sprintf("dispatch-%s-%d", t.ID, s.now().UnixNano()), "dispatch",
-			"From the main session, for task "+t.ID+" ("+t.Title+"):\n"+brief)
+			"From the main session, for task "+t.ID+" ("+t.Title+"):\n"+brief+where)
 	})
 	return t, err
+}
+
+func firstLine(s string, max int) string {
+	s, _, _ = strings.Cut(strings.TrimSpace(s), "\n")
+	if len(s) > max {
+		s = strings.TrimSpace(s[:max]) + "..."
+	}
+	return s
 }
 
 // Message leaves text from one agent for another, delivered on its feed.
@@ -312,30 +344,56 @@ func (s *Store) putEvent(tx *bolt.Tx, e *Event) error {
 	return putJSON(b, e.ID, *e)
 }
 
-// MayReply reports whether agent may post in conversation issue (a Linear
-// issue id or identifier): the main anywhere, a worker only on its task's
-// issue.
-func (s *Store) MayReply(agent, issue string) (Task, error) {
+// MayReply decides where agent may reply: the main in any conversation,
+// a worker only in its task's conversations (routed or reportTo). An empty
+// conv is the worker's own first conversation. It returns the conversation
+// and the worker's task.
+func (s *Store) MayReply(agent, conv string) (string, Task, error) {
 	if agent == MainAgent {
-		return Task{}, nil
+		if conv == "" {
+			return "", Task{}, errors.New("say which conversation to reply in")
+		}
+		return conv, Task{}, nil
 	}
 	a, err := s.Agent(agent)
 	if err != nil {
-		return Task{}, err
+		return "", Task{}, err
 	}
 	t, err := s.Task(a.TaskID)
 	if err != nil {
-		return Task{}, err
+		return "", Task{}, err
 	}
-	if issue == "" || issue == t.Issue {
-		return t, nil
-	}
-	for _, c := range t.Conversations {
-		if c == "linear:"+issue {
-			return t, nil
+	mine := append(append([]string(nil), t.Conversations...), t.ReportTo...)
+	if conv == "" {
+		if len(mine) == 0 {
+			return "", t, fmt.Errorf("%w: task %s has no conversation to reply in; tell the main session (samrajya_report)", ErrForbidden, t.ID)
 		}
+		return mine[0], t, nil
 	}
-	return Task{}, fmt.Errorf("%w: worker %s replies only on its task's issue (%s)", ErrForbidden, agent, t.Issue)
+	if slices.Contains(mine, conv) {
+		return conv, t, nil
+	}
+	return "", t, fmt.Errorf("%w: worker %s replies only in its task's conversations (%s)", ErrForbidden, agent, strings.Join(mine, ", "))
+}
+
+// FixMainSecret gives the main agent a secret that does not change between
+// launches, for a main session mahamantri does not launch itself
+// (opencode), and returns it.
+func (s *Store) FixMainSecret() (string, error) {
+	if _, err := s.EnsureMain(); err != nil {
+		return "", err
+	}
+	a, err := s.UpdateAgent(MainAgent, func(a *Agent) error {
+		if a.Secret == "" {
+			secret, err := newSecret()
+			if err != nil {
+				return err
+			}
+			a.Secret, a.Gen = secret, a.Gen+1
+		}
+		return nil
+	})
+	return a.Secret, err
 }
 
 // AgentRecovery is Recovery for one agent: its pending events, its open

@@ -6,8 +6,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/gopal-lohar/samrajya/mahamantri/linear"
 )
 
 func TestLimitResetsReadsClaudeCodesMessage(t *testing.T) {
@@ -39,21 +37,22 @@ func TestALimitIsShownAndTheSessionWokenWhenItResets(t *testing.T) {
 	s.Store.now = s.now
 	c.attach(false)
 
-	// The hook reports with the token alone: it has no attachment.
+	// The hook reports with the agent's id and secret: it has no attachment.
 	hook := &client{t: t, url: c.url, token: "tok"}
-	if code, _ := hook.do("POST", "/v1/limit", map[string]string{"message": "You've hit your 5-hour limit · resets 7:10pm (UTC)"}); code != http.StatusOK {
+	m, _ := s.Store.Agent(MainAgent)
+	if code, _ := hook.do("POST", "/v1/limit", map[string]string{"agent": MainAgent, "secret": m.Secret, "message": "You've hit your 5-hour limit · resets 7:10pm (UTC)"}); code != http.StatusOK {
 		t.Fatalf("limit: %d", code)
 	}
 	if st := s.currentStatus(); st.Label != "At my usage limit until 7:10pm UTC - pings wait until then" {
 		t.Errorf("status = %v", st)
 	}
-	s.Ingest(linear.Ping{Kind: "mention", IssueID: "iss", AuthorID: "u1", CommentID: "c1", ThreadID: "th"}, "d1")
+	s.ingestPing(tping{Kind: "mention", IssueID: "iss", AuthorID: "u1", CommentID: "c1", ThreadID: "th"}, "d1")
 	now = now.Add(20 * time.Minute)
 	c.do("GET", "/v1/status", nil) // keep the attachment fresh
 	s.mu.Lock()
 	s.atts[MainAgent].lastSeen = now
 	s.mu.Unlock()
-	s.nudge(context.Background(), 15*time.Minute)
+	s.nudge(context.Background())
 	if _, _, cm := fake.got(); len(cm) != 1 || !strings.Contains(cm[0], "usage limit until 7:10pm UTC") {
 		t.Errorf("nudge = %v", cm)
 	}
@@ -94,7 +93,8 @@ func TestActingWellAfterTheLimitEndsIt(t *testing.T) {
 	s.now = func() time.Time { return now }
 	s.Store.now = s.now
 	c.attach(false)
-	c.do("POST", "/v1/limit", map[string]string{"message": "API Error: Rate limit reached"})
+	m, _ := s.Store.Agent(MainAgent)
+	c.do("POST", "/v1/limit", map[string]string{"agent": MainAgent, "secret": m.Secret, "message": "API Error: Rate limit reached"})
 	if until := s.limitedUntil(); until.IsZero() || until.Sub(now) > unknownLimit+time.Minute {
 		t.Fatalf("an unreadable limit: until %v", until)
 	}
@@ -116,18 +116,18 @@ func TestOneNudgePerThreadAndReason(t *testing.T) {
 	s.now = func() time.Time { return now }
 	s.Store.now = s.now
 	for _, id := range []string{"c1", "c2"} {
-		s.Ingest(linear.Ping{Kind: "reply", IssueID: "iss", AuthorID: "u1", CommentID: id, ThreadID: "th"}, "d-"+id)
+		s.ingestPing(tping{Kind: "reply", IssueID: "iss", AuthorID: "u1", CommentID: id, ThreadID: "th"}, "d-"+id)
 	}
-	s.Ingest(linear.Ping{Kind: "mention", IssueID: "iss", AuthorID: "u1", CommentID: "c3", ThreadID: "other"}, "d3")
+	s.ingestPing(tping{Kind: "mention", IssueID: "iss", AuthorID: "u1", CommentID: "c3", ThreadID: "other"}, "d3")
 	now = now.Add(16 * time.Minute)
-	s.nudge(context.Background(), 15*time.Minute)
+	s.nudge(context.Background())
 	if _, _, cm := fake.got(); len(cm) != 2 {
 		t.Fatalf("nudges = %v", cm)
 	}
 	// A later ping in the same thread, still offline: covered already.
-	s.Ingest(linear.Ping{Kind: "reply", IssueID: "iss", AuthorID: "u1", CommentID: "c4", ThreadID: "th"}, "d4")
+	s.ingestPing(tping{Kind: "reply", IssueID: "iss", AuthorID: "u1", CommentID: "c4", ThreadID: "th"}, "d4")
 	now = now.Add(16 * time.Minute)
-	s.nudge(context.Background(), 15*time.Minute)
+	s.nudge(context.Background())
 	if _, _, cm := fake.got(); len(cm) != 2 {
 		t.Errorf("nudged the same thread twice: %v", cm)
 	}

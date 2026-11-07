@@ -51,11 +51,7 @@ func (l *claudeLauncher) Launch(ctx context.Context, a bridge.Agent, brief strin
 		return "", err
 	}
 	secretFile := filepath.Join(l.stateDir, a.ID+".secret")
-	tmp := secretFile + ".tmp"
-	if err := os.WriteFile(tmp, []byte(a.Secret), 0o600); err != nil {
-		return "", err
-	}
-	if err := os.Rename(tmp, secretFile); err != nil {
+	if err := writeSecret(secretFile, a.Secret); err != nil {
 		return "", err
 	}
 	settings, _ := json.Marshal(map[string]any{"env": map[string]string{
@@ -199,4 +195,16 @@ func runIn(ctx context.Context, argv []string, dir string) ([]byte, error) {
 		cmd.Env = append(os.Environ(), "PATH="+filepath.Join(home, ".local", "bin")+string(os.PathListSeparator)+os.Getenv("PATH"))
 	}
 	return cmd.CombinedOutput()
+}
+
+// writeSecret writes an agent's secret where only this user can read it.
+func writeSecret(path, secret string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(secret), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }

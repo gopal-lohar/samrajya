@@ -93,7 +93,8 @@ func setupOpencode(t *testing.T) (*fakeOpencode, config.Config, *bridge.Store) {
 	cfg.Opencode.ServerURL, cfg.Opencode.Password, cfg.Opencode.InstructionsFile = ts.URL, "pw", role
 	cfg.Opencode.Model.ProviderID, cfg.Opencode.Model.ID = "acme", "big"
 	cfg.Bridge.MainDirectory = dir
-	store, err := bridge.Open(filepath.Join(dir, "m.db"), nil)
+	cfg.Agents.StateDir = filepath.Join(dir, "agents")
+	store, err := bridge.Open(filepath.Join(dir, "m.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,15 +150,17 @@ func TestOpencodeDeliversEachPingOnceAndRecreatesALostSession(t *testing.T) {
 	go func() { o.deliver(ctx, srv); close(done) }()
 	t.Cleanup(func() { cancel(); <-done })
 
-	ping := linear.Ping{Kind: "mention", Issue: "ENG-1", Author: "Asha", AuthorID: "u", Body: "fix it", CommentID: "c1", ThreadID: "c1"}
-	srv.Ingest(ping, "d1")
+	lin := &linear.Surface{Receiver: srv}
+	srv.AddSurface(lin, bridge.Policy{})
+	ping := linear.Ping{Kind: "mention", Issue: "ENG-1", IssueID: "u-1", Author: "Asha", AuthorID: "u", Body: "fix it", CommentID: "c1", ThreadID: "c1"}
+	lin.Ingest(ping, "d1")
 	waitFor(t, func() bool { return fake.promptCount() == 1 }, "first delivery")
 	p := fake.prompts[0]
 	if p["delivery"] != "queue" || !strings.Contains(p["text"].(string), "samrajya_accept (event_id linear:c1)") || p["session"] != "ses_a" {
 		t.Errorf("prompt = %v", p)
 	}
 
-	srv.Ingest(ping, "d2") // a redelivery: same comment, nothing new
+	lin.Ingest(ping, "d2") // a redelivery: same comment, nothing new
 	time.Sleep(200 * time.Millisecond)
 	if fake.promptCount() != 1 {
 		t.Errorf("a redelivered ping was prompted again")
@@ -166,19 +169,36 @@ func TestOpencodeDeliversEachPingOnceAndRecreatesALostSession(t *testing.T) {
 	fake.mu.Lock()
 	delete(fake.sessions, "ses_a") // deleted on the opencode side
 	fake.mu.Unlock()
-	srv.Ingest(linear.Ping{Kind: "mention", Body: "next", CommentID: "c2", ThreadID: "c2"}, "d3")
+	lin.Ingest(linear.Ping{Kind: "mention", IssueID: "u-1", Body: "next", CommentID: "c2", ThreadID: "c2"}, "d3")
 	waitFor(t, func() bool { return fake.promptCount() == 2 }, "delivery to a recreated session")
 	if fake.prompts[1]["session"] != "ses_b" || store.Meta(sessionKey) != "ses_b" || fake.instructions["ses_b"] == "" {
 		t.Errorf("after loss: prompt %v, meta %q", fake.prompts[1], store.Meta(sessionKey))
 	}
 }
 
-func TestRenderPingMarksUntrustedAuthors(t *testing.T) {
-	got := renderPing(bridge.Event{ID: "linear:c1", Kind: "reply", Issue: "ENG-1", IssueTitle: "Fix", Author: "Bo", Body: "a\nb", ThreadID: "t1"})
-	for _, want := range []string{`Bo replied in a thread you are part of on ENG-1 ("Fix"). They are NOT a trusted requester.`, "> a\n> b", "answer with samrajya_reply on ENG-1, thread t1"} {
+func TestRenderPromptSaysHowToAnswer(t *testing.T) {
+	got := renderPrompt(bridge.Event{ID: "linear:c1", Source: "linear", Kind: "reply", Title: "ENG-1: Fix", Conversation: "linear:u-1", Author: "Bo", Body: "a\nb", ThreadID: "t1"})
+	for _, want := range []string{`Bo replied in a thread you are part of in "ENG-1: Fix"`, "NOT a trusted requester", "> a\n> b",
+		"samrajya_accept (event_id linear:c1)", "samrajya_reply in conversation linear:u-1, thread t1"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)
 		}
+	}
+}
+
+func TestOpencodeMainHasAFixedSecretForItsPlugin(t *testing.T) {
+	_, cfg, store := setupOpencode(t)
+	if _, err := newOpencodeMain(context.Background(), cfg, store, quiet); err != nil {
+		t.Fatal(err)
+	}
+	first, err := os.ReadFile(filepath.Join(cfg.Agents.StateDir, "main.secret"))
+	if err != nil || len(first) == 0 {
+		t.Fatalf("secret file: %v", err)
+	}
+	newOpencodeMain(context.Background(), cfg, store, quiet)
+	again, _ := os.ReadFile(filepath.Join(cfg.Agents.StateDir, "main.secret"))
+	if a, _ := store.Agent(bridge.MainAgent); a.Secret != string(first) || string(again) != string(first) {
+		t.Error("the main's secret changed across restarts")
 	}
 }
 

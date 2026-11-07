@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"strings"
+	"path/filepath"
 	"time"
 
 	"github.com/gopal-lohar/samrajya/mahamantri/bridge"
@@ -21,9 +21,11 @@ const (
 
 // opencodeMain is the main session in mode opencode: one session on the
 // opencode server, created once and remembered in the store, with the main
-// role installed as its instructions. Linear pings are prompted into it;
-// it reaches the bridge (accepting pings, tasks, actions, brain) through the
-// Samrajya MCP server configured in opencode.
+// role installed as its instructions. Messages are prompted into it; it
+// reaches the bridge (accepting them, tasks, actions, brain) through the
+// Samrajya MCP server configured in opencode, which attaches as the main
+// agent with the fixed secret in <agents.stateDir>/main.secret. There are no
+// workers in this mode.
 type opencodeMain struct {
 	client  *opencode.Client
 	cfg     config.Config
@@ -44,6 +46,13 @@ func newOpencodeMain(ctx context.Context, cfg config.Config, store *bridge.Store
 	}
 	if err := o.ensureSession(pingCtx); err != nil {
 		return nil, err
+	}
+	secret, err := store.FixMainSecret()
+	if err != nil {
+		return nil, err
+	}
+	if err := writeSecret(filepath.Join(cfg.Agents.StateDir, bridge.MainAgent+".secret"), secret); err != nil {
+		return nil, fmt.Errorf("main secret: %w", err)
 	}
 	return o, nil
 }
@@ -124,7 +133,7 @@ func (o *opencodeMain) deliver(ctx context.Context, srv *bridge.Server) {
 }
 
 func (o *opencodeMain) prompt(ctx context.Context, e bridge.Event) error {
-	req := opencode.PromptRequest{Text: renderPing(e), Delivery: "queue", Metadata: map[string]string{"source": "samrajya", "event_id": e.ID}}
+	req := opencode.PromptRequest{Text: renderPrompt(e), Delivery: "queue", Metadata: map[string]string{"source": "samrajya", "event_id": e.ID}}
 	err := o.client.Prompt(ctx, o.session, req)
 	if errors.Is(err, opencode.ErrNotFound) {
 		// The session was deleted under us: make a new one and try again.
@@ -138,42 +147,17 @@ func (o *opencodeMain) prompt(ctx context.Context, e bridge.Event) error {
 	return err
 }
 
-// renderPing is a ping as the main session reads it; it matches the channel
-// plugin's rendering, with the routing details inline because a prompt has
-// no metadata the model sees.
-func renderPing(e bridge.Event) string {
-	what := "mentioned you"
-	if e.Kind == "reply" {
-		what = "replied in a thread you are part of"
-	}
-	issue := "a Linear issue"
-	if e.Issue != "" {
-		issue = e.Issue
-		if e.IssueTitle != "" {
-			issue += fmt.Sprintf(" (%q)", e.IssueTitle)
-		}
-	}
-	author := e.Author
-	if author == "" {
-		author = "someone"
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "Linear: %s %s on %s.", author, what, issue)
-	if !e.Trusted {
-		b.WriteString(" They are NOT a trusted requester.")
-	}
-	b.WriteString("\nComment:\n> " + strings.ReplaceAll(strings.TrimSpace(e.Body), "\n", "\n> ") + "\n")
-	if e.URL != "" {
-		fmt.Fprintf(&b, "Link: %s\n", e.URL)
+// renderPrompt is an event as the main session reads it: a prompt has no
+// metadata the model sees, so how to accept and answer it is spelled out.
+func renderPrompt(e bridge.Event) string {
+	text := bridge.RenderEvent(e)
+	if e.Source == "samrajya" {
+		return text + fmt.Sprintf("\nAcknowledge it with samrajya_accept (event_id %s); it needs no task.", e.ID)
 	}
 	thread := e.ThreadID
 	if thread == "" {
-		thread = "(new)"
+		thread = "(none)"
 	}
-	on := e.Issue
-	if on == "" {
-		on = "the issue"
-	}
-	fmt.Fprintf(&b, "Accept it with samrajya_accept (event_id %s) before working on it; answer with samrajya_reply on %s, thread %s.", e.ID, on, thread)
-	return b.String()
+	return text + fmt.Sprintf("\nAccept it with samrajya_accept (event_id %s) before working on it; answer with samrajya_reply in conversation %s, thread %s.",
+		e.ID, e.Conversation, thread)
 }

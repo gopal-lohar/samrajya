@@ -1,23 +1,26 @@
-// Package bridge is what a native Claude Code main session needs from
-// mahamantri: a durable inbox of Linear pings, the tasks they become, a
-// journal of the external actions taken for them, and an authenticated
-// local API the Samrajya channel plugin reads and writes them through.
+// Package bridge is Samrajya's core: a durable inbox of messages from every
+// surface (Linear, chat, ...), the tasks they become, the agents that own
+// them, a journal of the external actions taken for them, and an
+// authenticated local API the Samrajya channel plugin reads and writes them
+// through. It knows conversations, not surfaces: adapters (package linear,
+// package telegram) bring messages in and take replies out.
 //
-// Delivery is at least once. A ping stays pending until the main session
-// accepts it into a task; until then every new channel connection is sent
-// it again. Accepting is idempotent, so a redelivered ping is harmless.
+// Delivery is at least once. An event stays pending until its owner accepts
+// it; until then every new channel connection is sent it again. Accepting is
+// idempotent, so a redelivered event is harmless.
 package bridge
 
 import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
-	"github.com/gopal-lohar/samrajya/mahamantri/linear"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -34,8 +37,11 @@ var (
 	bActions = []byte("actions")
 	bAgents  = []byte("agents")
 	// bConvs maps a conversation key (e.g. linear:<issue uuid>) to the task
-	// it belongs to.
+	// its messages are routed to.
 	bConvs = []byte("conversations")
+	// bPosted maps a message an agent posted (<conversation>/<ref>) to its
+	// task, so a reply to it goes to that task.
+	bPosted = []byte("posted")
 )
 
 // Task states. A task is open until done or cancelled.
@@ -74,35 +80,71 @@ func mayTouch(caller, owner string) error {
 	return fmt.Errorf("%w: it belongs to agent %s", ErrForbidden, owner)
 }
 
-// Event is a ping in the inbox.
+// Event is something in the inbox: a message from a surface, or a notice
+// or message from Samrajya itself (Source "samrajya").
 type Event struct {
-	ID         string    `json:"id"`
-	Seq        uint64    `json:"seq"`
-	Source     string    `json:"source"`
-	Kind       string    `json:"kind"`
-	Issue      string    `json:"issue,omitempty"`
-	IssueID    string    `json:"issueId,omitempty"`
-	IssueTitle string    `json:"issueTitle,omitempty"`
-	CommentID  string    `json:"commentId,omitempty"`
-	ThreadID   string    `json:"threadId,omitempty"`
-	Author     string    `json:"author,omitempty"`
-	AuthorID   string    `json:"authorId,omitempty"`
-	Trusted    bool      `json:"trusted"`
-	Body       string    `json:"body"`
-	URL        string    `json:"url,omitempty"`
-	Delivery   string    `json:"delivery,omitempty"`
-	ReceivedAt time.Time `json:"receivedAt"`
+	ID     string `json:"id"`
+	Seq    uint64 `json:"seq"`
+	Source string `json:"source"`
+	Kind   string `json:"kind"`
+	// Title says what the conversation is, for people (an issue's
+	// identifier and title, a chat's name).
+	Title string `json:"title,omitempty"`
+	// Issue and IssueID: a Linear issue's identifier and UUID.
+	Issue      string `json:"issue,omitempty"`
+	IssueID    string `json:"issueId,omitempty"`
+	IssueTitle string `json:"issueTitle,omitempty"` // events stored before Title
+	// Ref is the surface's id for the message (CommentID on events stored
+	// before Ref).
+	Ref       string `json:"ref,omitempty"`
+	CommentID string `json:"commentId,omitempty"`
+	// ThreadID is where a reply goes within the conversation.
+	ThreadID  string `json:"threadId,omitempty"`
+	InReplyTo string `json:"inReplyTo,omitempty"`
+	// Links are references (an issue, a URL); Attachments are files the
+	// message carried, kept by its surface.
+	Links       []string     `json:"links,omitempty"`
+	Attachments []Attachment `json:"attachments,omitempty"`
+	Author      string       `json:"author,omitempty"`
+	AuthorID    string       `json:"authorId,omitempty"`
+	Trusted     bool         `json:"trusted"`
+	Body        string       `json:"body"`
+	URL         string       `json:"url,omitempty"`
+	Delivery    string       `json:"delivery,omitempty"`
+	ReceivedAt  time.Time    `json:"receivedAt"`
 
 	AcceptedAt *time.Time `json:"acceptedAt,omitempty"`
 	TaskID     string     `json:"taskId,omitempty"`
 	// NudgedAt is when the person was told the ping is still waiting.
 	NudgedAt *time.Time `json:"nudgedAt,omitempty"`
-	// Conversation is where the event belongs and a reply goes, e.g.
-	// linear:<issue uuid>.
+	// Conversation is where the event came from and a reply goes, e.g.
+	// linear:<issue uuid> or telegram:<chat id>.
 	Conversation string `json:"conversation,omitempty"`
 	// Agent owns the event: it alone is sent it and may accept it. Empty
 	// (events stored before agents existed) means the main.
 	Agent string `json:"agent,omitempty"`
+}
+
+// MessageRef is the surface's id for the message.
+func (e Event) MessageRef() string {
+	if e.Ref != "" {
+		return e.Ref
+	}
+	return e.CommentID
+}
+
+// Heading says what the conversation is: its title, or failing that its
+// issue or key.
+func (e Event) Heading() string {
+	switch {
+	case e.Title != "":
+		return e.Title
+	case e.Issue != "" && e.IssueTitle != "":
+		return e.Issue + ": " + e.IssueTitle
+	case e.Issue != "":
+		return e.Issue
+	}
+	return e.Conversation
 }
 
 // Owner is the agent that owns the event.
@@ -113,8 +155,8 @@ func (e Event) Owner() string {
 	return e.Agent
 }
 
-// Task is a piece of work the main session owns: what was asked, where it
-// came from, where it stands and what happens next.
+// Task is a piece of work: what was asked, where it came from, where it
+// stands and what happens next. It need not be a ticket anywhere.
 type Task struct {
 	ID         string    `json:"id"`
 	Title      string    `json:"title"`
@@ -130,10 +172,15 @@ type Task struct {
 	UpdatedAt  time.Time `json:"updatedAt"`
 	// Agent owns the task; empty means the main.
 	Agent string `json:"agent,omitempty"`
-	// Conversations linked to the task: its events route to its agent, and
-	// its agent may reply in them.
+	// Conversations routed to the task: their new messages go to its
+	// agent, and its agent may reply in them.
 	Conversations []string `json:"conversations,omitempty"`
-	Worktree      string   `json:"worktree,omitempty"`
+	// ReportTo are conversations its agent may reply in without taking
+	// their messages (a worker reporting in the person's chat).
+	ReportTo []string `json:"reportTo,omitempty"`
+	// Links are references for people and agents: an issue, a PR, a doc.
+	Links    []string `json:"links,omitempty"`
+	Worktree string   `json:"worktree,omitempty"`
 }
 
 // Owner is the agent that owns the task.
@@ -148,10 +195,11 @@ func (t Task) Open() bool { return t.Status != Done && t.Status != Cancelled }
 
 // NewTask describes a task to create.
 type NewTask struct {
-	Title    string `json:"title"`
-	Issue    string `json:"issue,omitempty"`
-	ThreadID string `json:"threadId,omitempty"`
-	Project  string `json:"project,omitempty"`
+	Title    string   `json:"title"`
+	Issue    string   `json:"issue,omitempty"`
+	ThreadID string   `json:"threadId,omitempty"`
+	Project  string   `json:"project,omitempty"`
+	Links    []string `json:"links,omitempty"`
 }
 
 // TaskUpdate changes a task; empty fields are left as they are.
@@ -190,21 +238,34 @@ type Recovery struct {
 // file, so a second mahamantri on the same store fails to open it rather
 // than both consuming the inbox.
 type Store struct {
-	db      *bolt.DB
-	trusted map[string]bool
-	now     func() time.Time
-	// workers routes a trusted ping on an issue with no task to a new task
-	// and worker (see route). Off, everything goes to the main.
-	workers bool
+	db  *bolt.DB
+	now func() time.Time
+	// policies say how each surface's conversations are routed (see
+	// route); a surface without one goes to the main.
+	mu       sync.Mutex
+	policies map[string]Policy
 }
 
-// RouteToWorkers turns routing of issues to workers on or off.
-func (s *Store) RouteToWorkers(on bool) { s.workers = on }
+// SetPolicy sets how a surface's conversations are routed.
+func (s *Store) SetPolicy(surface string, p Policy) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.policies == nil {
+		s.policies = map[string]Policy{}
+	}
+	s.policies[surface] = p
+}
 
-// Open opens (creating if needed) the store at path. Events from authors in
-// trusted (Linear user ids) are marked Trusted; with none listed, every
-// author is.
-func Open(path string, trusted []string) (*Store, error) {
+func (s *Store) policy(surface string) Policy {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.policies[surface]
+}
+
+func (s *Store) startsWork(surface string) bool { return s.policy(surface).StartsWork }
+
+// Open opens (creating if needed) the store at path.
+func Open(path string) (*Store, error) {
 	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: time.Second})
 	if errors.Is(err, bolt.ErrTimeout) {
 		return nil, fmt.Errorf("%s is in use by another mahamantri", path)
@@ -213,7 +274,7 @@ func Open(path string, trusted []string) (*Store, error) {
 		return nil, err
 	}
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bMeta, bEvents, bTasks, bThreads, bActions, bAgents, bConvs} {
+		for _, b := range [][]byte{bMeta, bEvents, bTasks, bThreads, bActions, bAgents, bConvs, bPosted} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err
 			}
@@ -239,130 +300,261 @@ func Open(path string, trusted []string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	s := &Store{db: db, now: func() time.Time { return time.Now().UTC() }}
-	if len(trusted) > 0 {
-		s.trusted = map[string]bool{}
-		for _, id := range trusted {
-			s.trusted[id] = true
-		}
-	}
-	return s, nil
+	return &Store{db: db, now: func() time.Time { return time.Now().UTC() }}, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
 
-// Ingest keeps a ping. A comment already in the inbox - Linear redelivering
-// it - is left as it is.
-func (s *Store) Ingest(p linear.Ping, delivery string) error {
-	_, err := s.IngestNew(p, delivery)
-	return err
+// Ingest keeps a message from a surface and reports whether it is new. A
+// message already in the inbox (a surface redelivering it) is left as it
+// is.
+func (s *Store) Ingest(in Inbound) (bool, error) {
+	switch {
+	case in.ID == "":
+		return false, errors.New("a message needs an id")
+	case in.Conversation == "" || !strings.Contains(in.Conversation, ":"):
+		return false, fmt.Errorf("message %s: conversation %q is not <surface>:<id>", in.ID, in.Conversation)
+	}
+	created := false
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		var err error
+		created, err = s.ingestTx(tx, inboundEvent(in))
+		return err
+	})
+	return created, err
 }
 
-// IngestNew is Ingest that also reports whether the ping was new rather than
-// a redelivery.
-func (s *Store) IngestNew(p linear.Ping, delivery string) (bool, error) {
-	id := "linear:" + p.CommentID
-	if p.CommentID == "" {
-		if delivery == "" {
-			return false, errors.New("ping has neither a comment id nor a delivery id")
+// IngestBatch keeps several messages and sets a meta value (a surface's
+// read position) in one transaction, so the position never moves past a
+// message that was not kept, and no message is kept twice.
+func (s *Store) IngestBatch(ins []Inbound, metaKey, metaValue string) ([]bool, error) {
+	created := make([]bool, len(ins))
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		for i, in := range ins {
+			if in.ID == "" || !strings.Contains(in.Conversation, ":") {
+				return fmt.Errorf("message %q: conversation %q is not <surface>:<id>", in.ID, in.Conversation)
+			}
+			var err error
+			if created[i], err = s.ingestTx(tx, inboundEvent(in)); err != nil {
+				return err
+			}
 		}
-		id = "linear-delivery:" + delivery
-	}
-	return s.ingest(Event{
-		ID: id, Source: "linear", Kind: p.Kind,
-		Issue: p.Issue, IssueID: p.IssueID, IssueTitle: p.IssueTitle,
-		CommentID: p.CommentID, ThreadID: p.ThreadID,
-		Author: p.Author, AuthorID: p.AuthorID, Trusted: s.trusted == nil || s.trusted[p.AuthorID],
-		Body: truncate(p.Body, maxBody), URL: p.URL, Delivery: delivery,
+		if metaKey == "" {
+			return nil
+		}
+		return tx.Bucket(bMeta).Put([]byte("x:"+metaKey), []byte(metaValue))
 	})
+	return created, err
+}
+
+func inboundEvent(in Inbound) Event {
+	return Event{
+		ID: in.ID, Source: SurfaceOf(in.Conversation), Kind: in.Kind, Conversation: in.Conversation,
+		Title: in.Title, Ref: in.Ref, ThreadID: in.Thread, InReplyTo: in.InReplyTo,
+		Links: in.Links, Attachments: in.Attachments,
+		Author: in.Author, AuthorID: in.AuthorID, Trusted: in.Trusted,
+		Body: truncate(in.Body, maxBody), URL: in.URL, Delivery: in.Delivery,
+	}
 }
 
 func (s *Store) ingest(e Event) (bool, error) {
 	created := false
 	err := s.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(bEvents)
-		if b.Get([]byte(e.ID)) != nil {
-			return nil
-		}
-		seq, err := b.NextSequence()
-		if err != nil {
-			return err
-		}
-		e.Seq, e.ReceivedAt, created = seq, s.now(), true
-		if e.Agent == "" {
-			if e.Agent, err = s.route(tx, &e); err != nil {
-				return err
-			}
-		}
-		return putJSON(b, e.ID, e)
+		var err error
+		created, err = s.ingestTx(tx, e)
+		return err
 	})
 	return created, err
 }
 
-// route picks the agent that owns a new event, in the transaction that
-// stores it, so an event is never stored without an owner and two pings
-// for a new issue cannot make two tasks:
-//  1. a conversation linked to a task goes to that task's agent; a finished
-//     task is reopened rather than duplicated;
-//  2. with workers on, a trusted ping on an issue with no task makes a task
-//     and a worker for it;
-//  3. anything else goes to the main.
-func (s *Store) route(tx *bolt.Tx, e *Event) (string, error) {
-	if e.Source == "linear" && e.IssueID != "" {
-		e.Conversation = "linear:" + e.IssueID
+func (s *Store) ingestTx(tx *bolt.Tx, e Event) (bool, error) {
+	b := tx.Bucket(bEvents)
+	if b.Get([]byte(e.ID)) != nil {
+		return false, nil
 	}
+	seq, err := b.NextSequence()
+	if err != nil {
+		return false, err
+	}
+	e.Seq, e.ReceivedAt = seq, s.now()
+	if e.Agent == "" {
+		if e.Agent, err = s.route(tx, &e); err != nil {
+			return false, err
+		}
+	}
+	return true, putJSON(b, e.ID, e)
+}
+
+// route picks the agent that owns a new event, in the transaction that
+// stores it, so an event is never stored without an owner and two messages
+// for a new conversation cannot make two tasks:
+//  1. a reply to a message an agent posted goes to that agent's task;
+//  2. a conversation routed to a task goes to that task's agent. A
+//     finished task is reopened (Policy.Reopen: an issue stays one piece of
+//     work), or else the conversation goes back to the main (a chat);
+//  3. a trusted message from a surface that starts work (Policy.StartsWork)
+//     makes a task and a worker for it;
+//  4. anything else goes to the main, which answers it or dispatches.
+//
+// Only trusted messages reach a worker: an untrusted one is the main's to
+// judge.
+func (s *Store) route(tx *bolt.Tx, e *Event) (string, error) {
 	if e.Conversation == "" {
 		return MainAgent, nil
 	}
 	tasks := tx.Bucket(bTasks)
+	pol := s.policy(SurfaceOf(e.Conversation))
+	if e.InReplyTo != "" && e.Trusted {
+		if id := tx.Bucket(bPosted).Get([]byte(e.Conversation + "/" + e.InReplyTo)); id != nil {
+			var t Task
+			if err := getJSON(tasks, string(id), &t); err == nil {
+				if !t.Open() {
+					t.Status, t.UpdatedAt = Queued, s.now()
+					if err := putJSON(tasks, t.ID, t); err != nil {
+						return "", err
+					}
+				}
+				return t.Owner(), nil
+			}
+		}
+	}
 	if id := tx.Bucket(bConvs).Get([]byte(e.Conversation)); id != nil {
 		var t Task
 		if err := getJSON(tasks, string(id), &t); err != nil {
 			return "", fmt.Errorf("conversation %s: task %s: %w", e.Conversation, id, err)
 		}
-		if !t.Open() {
+		switch {
+		case t.Open():
+			return t.Owner(), nil
+		case pol.Reopen:
 			t.Status, t.UpdatedAt = Queued, s.now()
 			if err := putJSON(tasks, t.ID, t); err != nil {
 				return "", err
 			}
+			return t.Owner(), nil
+		default:
+			// The work is finished: the conversation is the main's again.
+			if err := tx.Bucket(bConvs).Delete([]byte(e.Conversation)); err != nil {
+				return "", err
+			}
+			t.Conversations = slices.DeleteFunc(t.Conversations, func(c string) bool { return c == e.Conversation })
+			if !slices.Contains(t.ReportTo, e.Conversation) {
+				t.ReportTo = append(t.ReportTo, e.Conversation)
+			}
+			if err := putJSON(tasks, t.ID, t); err != nil {
+				return "", err
+			}
+			return MainAgent, nil
 		}
-		return t.Owner(), nil
 	}
-	if !s.workers || !e.Trusted {
+	if !e.Trusted || !pol.StartsWork {
 		return MainAgent, nil
 	}
-	title := e.Issue
-	if e.IssueTitle != "" {
-		title += ": " + e.IssueTitle
-	}
-	t, err := newTask(tasks, NewTask{Title: title, Issue: e.Issue, ThreadID: e.ThreadID}, s.now())
+	n := NewTask{Title: e.Heading(), ThreadID: e.ThreadID, Links: e.Links}
+	t, err := newTask(tasks, n, s.now())
 	if err != nil {
 		return "", err
 	}
-	if err := s.assignWorker(tx, &t, e.Conversation); err != nil {
+	if err := s.assignWorker(tx, &t, e.Conversation, true); err != nil {
 		return "", err
 	}
 	return t.Agent, nil
 }
 
-// assignWorker gives task t a worker agent of its own and links conv (if
-// any) to it.
-func (s *Store) assignWorker(tx *bolt.Tx, t *Task, conv string) error {
+// assignWorker gives task t a worker agent of its own, and routes conv
+// (if any) to it, or only lets it report there.
+func (s *Store) assignWorker(tx *bolt.Tx, t *Task, conv string, route bool) error {
 	a := Agent{ID: "w-" + t.ID, Role: RoleWorker, TaskID: t.ID, State: AgentIdle, CreatedAt: s.now()}
 	if err := putJSON(tx.Bucket(bAgents), a.ID, a); err != nil {
 		return err
 	}
 	t.Agent = a.ID
 	if conv != "" {
-		if err := tx.Bucket(bConvs).Put([]byte(conv), []byte(t.ID)); err != nil {
+		if err := s.linkConversation(tx, t, conv, route); err != nil {
 			return err
 		}
-		t.Conversations = append(t.Conversations, conv)
 	}
 	return putJSON(tx.Bucket(bTasks), t.ID, *t)
 }
 
-// Has reports whether Senapati has written in threadID (linear.ThreadIndex).
+// linkConversation routes conv to task t, or only lets t's agent report
+// there. A conversation is routed to at most one task.
+func (s *Store) linkConversation(tx *bolt.Tx, t *Task, conv string, route bool) error {
+	if !route {
+		if !slices.Contains(t.ReportTo, conv) {
+			t.ReportTo = append(t.ReportTo, conv)
+		}
+		return nil
+	}
+	if id := tx.Bucket(bConvs).Get([]byte(conv)); id != nil && string(id) != t.ID {
+		return fmt.Errorf("conversation %s is already routed to task %s", conv, id)
+	}
+	if err := tx.Bucket(bConvs).Put([]byte(conv), []byte(t.ID)); err != nil {
+		return err
+	}
+	if !slices.Contains(t.Conversations, conv) {
+		t.Conversations = append(t.Conversations, conv)
+	}
+	return nil
+}
+
+// LinkOpenIssues routes each open task that has no conversation yet to the
+// Linear issues of its events, so follow-ups on work started before
+// conversations existed go to that work, not to a new worker. It is
+// idempotent and returns how many tasks it linked.
+func (s *Store) LinkOpenIssues() (int, error) {
+	n := 0
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		tasks, events, convs := tx.Bucket(bTasks), tx.Bucket(bEvents), tx.Bucket(bConvs)
+		var open []Task
+		err := tasks.ForEach(func(_, v []byte) error {
+			var t Task
+			if err := json.Unmarshal(v, &t); err != nil {
+				return err
+			}
+			if t.Open() && len(t.Conversations) == 0 {
+				open = append(open, t)
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		for _, t := range open {
+			linked := false
+			for _, id := range t.Events {
+				var e Event
+				if getJSON(events, id, &e) != nil || e.Source != "linear" {
+					continue
+				}
+				conv := e.Conversation
+				if conv == "" && e.IssueID != "" {
+					conv = "linear:" + e.IssueID // stored before conversations
+				}
+				if conv == "" || slices.Contains(t.Conversations, conv) {
+					continue
+				}
+				if convs.Get([]byte(conv)) != nil {
+					continue
+				}
+				if err := convs.Put([]byte(conv), []byte(t.ID)); err != nil {
+					return err
+				}
+				t.Conversations, linked = append(t.Conversations, conv), true
+			}
+			if linked {
+				n++
+				if err := putJSON(tasks, t.ID, t); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+	return n, err
+}
+
+// Has reports whether Samrajya has written in threadID (linear.ThreadIndex).
 func (s *Store) Has(threadID string) bool {
 	found := false
 	s.db.View(func(tx *bolt.Tx) error {
@@ -372,7 +564,7 @@ func (s *Store) Has(threadID string) bool {
 	return found
 }
 
-// Add records that Senapati wrote in threadID.
+// Add records that Samrajya wrote in threadID.
 func (s *Store) Add(threadID, issue string) error {
 	if threadID == "" {
 		return errors.New("empty thread id")
@@ -466,8 +658,8 @@ func (s *Store) acknowledge(caller string, ids []string) error {
 			if err := mayTouch(caller, e.Owner()); err != nil {
 				return fmt.Errorf("event %s: %w", id, err)
 			}
-			if e.Source == "linear" {
-				return fmt.Errorf("event %s is a ping: accept it into a task (task id or new task)", id)
+			if e.Source != "samrajya" {
+				return fmt.Errorf("event %s is a message: accept it into a task (task id or new task)", id)
 			}
 			if e.AcceptedAt == nil {
 				e.AcceptedAt = &now
@@ -550,6 +742,11 @@ func (s *Store) AcceptAs(caller string, eventIDs []string, taskID string, create
 			if task.Issue == "" {
 				task.Issue = e.Issue
 			}
+			for _, l := range e.Links {
+				if !slices.Contains(task.Links, l) {
+					task.Links = append(task.Links, l)
+				}
+			}
 			if task.ThreadID == "" {
 				task.ThreadID = e.ThreadID
 			}
@@ -583,7 +780,7 @@ func newTask(b *bolt.Bucket, n NewTask, now time.Time) (Task, error) {
 		return Task{}, err
 	}
 	t := Task{ID: fmt.Sprintf("T%d", seq), Title: n.Title, Issue: n.Issue, ThreadID: n.ThreadID, Project: n.Project,
-		Status: Queued, CreatedAt: now, UpdatedAt: now}
+		Links: n.Links, Status: Queued, CreatedAt: now, UpdatedAt: now}
 	return t, putJSON(b, t.ID, t)
 }
 
@@ -690,10 +887,9 @@ func (s *Store) IntendAs(caller string, a Action) (Action, error) {
 	return a, err
 }
 
-// Resolve records how an intended action turned out. When it posted a Linear
-// comment, threadID (the thread it is in) is learned at once, so a reply
-// there reaches the main session even before Linear's webhook for the
-// comment itself arrives.
+// Resolve records how an intended action turned out. When it posted a
+// reply, threadID (the thread it is in) is learned at once, so a reply
+// there reaches Samrajya even before the surface reports the reply itself.
 func (s *Store) Resolve(id, status, ref, note, threadID, issue string) (Action, error) {
 	return s.ResolveAs(MainAgent, id, status, ref, note, threadID, issue)
 }
@@ -718,6 +914,13 @@ func (s *Store) ResolveAs(caller, id, status, ref, note, threadID, issue string)
 		a.Status, a.Ref, a.Note, a.UpdatedAt = status, ref, note, s.now()
 		if status == Happened && threadID != "" {
 			if err := tx.Bucket(bThreads).Put([]byte(threadID), []byte(issue)); err != nil {
+				return err
+			}
+		}
+		if status == Happened && ref != "" && a.TaskID != "" && strings.Contains(issue, ":") {
+			// issue is the conversation for replies posted through a
+			// surface: a reply to this message goes to the task.
+			if err := tx.Bucket(bPosted).Put([]byte(issue+"/"+ref), []byte(a.TaskID)); err != nil {
 				return err
 			}
 		}
@@ -776,5 +979,5 @@ func truncate(s string, max int) string {
 	for cut > 0 && !utf8.RuneStart(s[cut]) {
 		cut--
 	}
-	return s[:cut] + "\n[... cut; read the rest on Linear]"
+	return s[:cut] + "\n[... cut; read the rest at the source]"
 }

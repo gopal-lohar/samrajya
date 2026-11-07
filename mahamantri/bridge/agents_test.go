@@ -8,19 +8,17 @@ import (
 	bolt "go.etcd.io/bbolt"
 	"sync"
 	"testing"
-
-	"github.com/gopal-lohar/samrajya/mahamantri/linear"
 )
 
-func issuePing(issue, issueID, comment, thread string) linear.Ping {
-	return linear.Ping{Kind: "mention", Issue: issue, IssueID: issueID, IssueTitle: "Work on " + issue,
+func issuePing(issue, issueID, comment, thread string) tping {
+	return tping{Kind: "mention", Issue: issue, IssueID: issueID, IssueTitle: "Work on " + issue,
 		Author: "Asha", AuthorID: "u-asha", Body: "please", CommentID: comment, ThreadID: thread}
 }
 
 func workerStore(t *testing.T) *Store {
 	t.Helper()
 	s, _ := openStore(t, "u-asha")
-	s.RouteToWorkers(true)
+	s.SetPolicy("linear", linearPolicy)
 	if _, err := s.EnsureMain(); err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +40,7 @@ func TestEachIssueGetsItsOwnWorkerAndKeepsIt(t *testing.T) {
 	s := workerStore(t)
 	for i, issue := range []string{"ENG-1", "ENG-2", "ENG-3"} {
 		c := fmt.Sprintf("c%d", i)
-		if err := s.Ingest(issuePing(issue, "uuid-"+issue, c, c), ""); err != nil {
+		if err := s.ingestPing(issuePing(issue, "uuid-"+issue, c, c), ""); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -55,8 +53,8 @@ func TestEachIssueGetsItsOwnWorkerAndKeepsIt(t *testing.T) {
 		seen[o] = true
 	}
 	// A reply in the first thread and a new thread on the same issue.
-	s.Ingest(issuePing("ENG-1", "uuid-ENG-1", "c0b", "c0"), "")
-	s.Ingest(issuePing("ENG-1", "uuid-ENG-1", "c0c", "c0c"), "")
+	s.ingestPing(issuePing("ENG-1", "uuid-ENG-1", "c0b", "c0"), "")
+	s.ingestPing(issuePing("ENG-1", "uuid-ENG-1", "c0c", "c0c"), "")
 	for _, c := range []string{"c0b", "c0c"} {
 		if got, want := owner(t, s, c), owner(t, s, "c0"); got != want {
 			t.Errorf("%s went to %s, want %s", c, got, want)
@@ -88,7 +86,7 @@ func TestConcurrentPingsForANewIssueMakeOneTask(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			c := fmt.Sprintf("c%d", i)
-			if err := s.Ingest(issuePing("ENG-9", "uuid-9", c, c), ""); err != nil {
+			if err := s.ingestPing(issuePing("ENG-9", "uuid-9", c, c), ""); err != nil {
 				t.Error(err)
 			}
 		}()
@@ -96,7 +94,7 @@ func TestConcurrentPingsForANewIssueMakeOneTask(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if _, err := s.Dispatch(NewTask{Title: "ENG-9", Issue: "ENG-9"}, "linear:uuid-9", "look at it"); err != nil {
+		if _, err := s.Dispatch(NewTask{Title: "ENG-9"}, "linear:uuid-9", true, "look at it"); err != nil {
 			t.Error(err)
 		}
 	}()
@@ -115,8 +113,8 @@ func TestConcurrentPingsForANewIssueMakeOneTask(t *testing.T) {
 // (the issue moved team) keeps its task.
 func TestIdentifierChangeKeepsTheTask(t *testing.T) {
 	s := workerStore(t)
-	s.Ingest(issuePing("ENG-1", "uuid-1", "c1", "c1"), "")
-	s.Ingest(issuePing("OPS-7", "uuid-1", "c2", "c2"), "")
+	s.ingestPing(issuePing("ENG-1", "uuid-1", "c1", "c1"), "")
+	s.ingestPing(issuePing("OPS-7", "uuid-1", "c2", "c2"), "")
 	if owner(t, s, "c1") != owner(t, s, "c2") {
 		t.Error("moved issue got a second worker")
 	}
@@ -127,7 +125,7 @@ func TestUntrustedPingOnANewIssueGoesToTheMain(t *testing.T) {
 	s := workerStore(t)
 	p := issuePing("ENG-1", "uuid-1", "c1", "c1")
 	p.AuthorID = "u-stranger"
-	s.Ingest(p, "")
+	s.ingestPing(p, "")
 	if o := owner(t, s, "c1"); o != MainAgent {
 		t.Errorf("owner %s", o)
 	}
@@ -140,7 +138,7 @@ func TestUntrustedPingOnANewIssueGoesToTheMain(t *testing.T) {
 // tasks, as before agents.
 func TestWorkersOffRoutesEverythingToTheMain(t *testing.T) {
 	s, _ := openStore(t, "u-asha")
-	s.Ingest(issuePing("ENG-1", "uuid-1", "c1", "c1"), "")
+	s.ingestPing(issuePing("ENG-1", "uuid-1", "c1", "c1"), "")
 	if o := owner(t, s, "c1"); o != MainAgent {
 		t.Errorf("owner %s", o)
 	}
@@ -152,8 +150,8 @@ func TestWorkersOffRoutesEverythingToTheMain(t *testing.T) {
 // Acceptance 11: a worker acts only on what it owns.
 func TestAWorkerActsOnlyOnItsOwnTask(t *testing.T) {
 	s := workerStore(t)
-	s.Ingest(issuePing("ENG-1", "uuid-1", "c1", "c1"), "")
-	s.Ingest(issuePing("ENG-2", "uuid-2", "c2", "c2"), "")
+	s.ingestPing(issuePing("ENG-1", "uuid-1", "c1", "c1"), "")
+	s.ingestPing(issuePing("ENG-2", "uuid-2", "c2", "c2"), "")
 	w1, w2 := owner(t, s, "c1"), owner(t, s, "c2")
 	a1, _ := s.Agent(w1)
 	a2, _ := s.Agent(w2)
@@ -176,13 +174,13 @@ func TestAWorkerActsOnlyOnItsOwnTask(t *testing.T) {
 	if _, err := s.IntendAs(w1, Action{TaskID: a2.TaskID, Kind: "k", Target: "t", Intent: "i"}); !errors.Is(err, ErrForbidden) {
 		t.Errorf("intending for another's task: %v", err)
 	}
-	if _, err := s.MayReply(w1, "ENG-2"); !errors.Is(err, ErrForbidden) {
+	if _, _, err := s.MayReply(w1, "linear:uuid-2"); !errors.Is(err, ErrForbidden) {
 		t.Errorf("replying on another's issue: %v", err)
 	}
-	if _, err := s.MayReply(w1, "uuid-1"); err != nil {
-		t.Errorf("replying on its own issue by uuid: %v", err)
+	if c, _, err := s.MayReply(w1, ""); err != nil || c != "linear:uuid-1" {
+		t.Errorf("replying in its own conversation: %q %v", c, err)
 	}
-	if _, err := s.MayReply(MainAgent, "ENG-2"); err != nil {
+	if _, _, err := s.MayReply(MainAgent, "telegram:42"); err != nil {
 		t.Errorf("main replying: %v", err)
 	}
 	// The main may act for anyone.
@@ -193,14 +191,14 @@ func TestAWorkerActsOnlyOnItsOwnTask(t *testing.T) {
 
 func TestAFinishedTaskIsReopenedNotDuplicated(t *testing.T) {
 	s := workerStore(t)
-	s.Ingest(issuePing("ENG-1", "uuid-1", "c1", "c1"), "")
+	s.ingestPing(issuePing("ENG-1", "uuid-1", "c1", "c1"), "")
 	w := owner(t, s, "c1")
 	a, _ := s.Agent(w)
 	s.AcceptAs(w, []string{"linear:c1"}, a.TaskID, nil, "go")
 	if _, err := s.UpdateTaskAs(w, a.TaskID, TaskUpdate{Status: Done, Result: "fixed, tested"}); err != nil {
 		t.Fatal(err)
 	}
-	s.Ingest(issuePing("ENG-1", "uuid-1", "c2", "c1"), "")
+	s.ingestPing(issuePing("ENG-1", "uuid-1", "c2", "c1"), "")
 	if owner(t, s, "c2") != w {
 		t.Error("follow-up on a finished task went elsewhere")
 	}
@@ -215,7 +213,7 @@ func TestAFinishedTaskIsReopenedNotDuplicated(t *testing.T) {
 
 func TestLaunchingFencesAndBriefsTheAgent(t *testing.T) {
 	s := workerStore(t)
-	s.Ingest(issuePing("ENG-1", "uuid-1", "c1", "c1"), "")
+	s.ingestPing(issuePing("ENG-1", "uuid-1", "c1", "c1"), "")
 	w := owner(t, s, "c1")
 	a1, err := s.Launching(w, "samrajya")
 	if err != nil {
@@ -233,7 +231,7 @@ func TestLaunchingFencesAndBriefsTheAgent(t *testing.T) {
 
 func TestReportsReachTheMainOnlyWhenTheyNeedIt(t *testing.T) {
 	s := workerStore(t)
-	s.Ingest(issuePing("ENG-1", "uuid-1", "c1", "c1"), "")
+	s.ingestPing(issuePing("ENG-1", "uuid-1", "c1", "c1"), "")
 	w := owner(t, s, "c1")
 	s.Report(w, ReportProgress, "halfway")
 	s.Report(w, ReportDone, "PR open")
@@ -254,10 +252,10 @@ func TestReportsReachTheMainOnlyWhenTheyNeedIt(t *testing.T) {
 
 func TestSchemaOneIsUpgradedInPlaceWithABackup(t *testing.T) {
 	s, path := openStore(t)
-	s.Ingest(issuePing("ENG-1", "uuid-1", "c1", "c1"), "")
+	s.ingestPing(issuePing("ENG-1", "uuid-1", "c1", "c1"), "")
 	s.db.Update(func(tx *bolt.Tx) error { return tx.Bucket(bMeta).Put([]byte("schema"), []byte("1")) })
 	s.Close()
-	s2, err := Open(path, nil)
+	s2, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}

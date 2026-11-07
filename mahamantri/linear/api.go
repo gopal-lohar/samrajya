@@ -128,19 +128,34 @@ func (a *API) viewer(ctx context.Context) (string, error) {
 	return a.me, nil
 }
 
+// IssueID is the UUID of an issue given by its key (e.g. ENG-1).
+func (a *API) IssueID(ctx context.Context, issue string) (string, error) {
+	if isUUID(issue) {
+		return issue, nil
+	}
+	var found struct {
+		Issue struct {
+			ID string `json:"id"`
+		} `json:"issue"`
+	}
+	if err := a.do(ctx, `query($id: String!) { issue(id: $id) { id } }`, map[string]any{"id": issue}, &found); err != nil {
+		return "", err
+	}
+	if found.Issue.ID == "" {
+		return "", errors.New("no such issue")
+	}
+	return found.Issue.ID, nil
+}
+
 // Comment posts body on an issue (its id or key, e.g. ENG-1) as Senapati,
 // in the thread parentID if set, and returns the new comment.
 func (a *API) Comment(ctx context.Context, issue, parentID, body string) (Posted, error) {
 	if !isUUID(issue) {
-		var found struct {
-			Issue struct {
-				ID string `json:"id"`
-			} `json:"issue"`
-		}
-		if err := a.do(ctx, `query($id: String!) { issue(id: $id) { id } }`, map[string]any{"id": issue}, &found); err != nil {
+		id, err := a.IssueID(ctx, issue)
+		if err != nil {
 			return Posted{}, fmt.Errorf("issue %s: %w", issue, err)
 		}
-		issue = found.Issue.ID
+		issue = id
 	}
 	input := map[string]string{"issueId": issue, "body": body}
 	if parentID != "" {

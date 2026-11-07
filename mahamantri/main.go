@@ -1,7 +1,8 @@
-// Mahamantri is the bridge between Linear and Samrajya's main assistant
-// session: it keeps the durable inbox of Linear pings, the tasks they
-// become, the journal of external actions and the brain, and serves them to
-// the session over a local, authenticated API. See README.md.
+// Mahamantri is Samrajya's core: it takes messages from every surface
+// (Linear, Telegram) into a durable inbox, routes them to the agent that
+// owns their work, runs and supervises the agents (a main session and a
+// worker per piece of work), and keeps the tasks, the journal of external
+// actions and the brain. See README.md.
 package main
 
 import (
@@ -25,6 +26,7 @@ import (
 	"github.com/gopal-lohar/samrajya/mahamantri/bridge"
 	"github.com/gopal-lohar/samrajya/mahamantri/config"
 	"github.com/gopal-lohar/samrajya/mahamantri/linear"
+	"github.com/gopal-lohar/samrajya/mahamantri/telegram"
 )
 
 func main() {
@@ -42,9 +44,10 @@ func main() {
 	}
 }
 
-// run serves the bridge: the Linear webhook into the durable inbox, and the
-// local API the main session's tools use. It never stops the main session
-// itself; Ctrl+C stops mahamantri only.
+// run serves the bridge: surfaces into the durable inbox, the local API the
+// sessions' tools use, and (mode claude) the supervisor that runs the
+// sessions. Ctrl+C stops mahamantri; the sessions it launched keep running
+// and reattach when it is back.
 func run(configPath string) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {
@@ -57,33 +60,61 @@ func run(configPath string) error {
 	defer logFile.Close()
 	logger := log.New(logFile, "", log.LstdFlags)
 
-	store, err := bridge.Open(cfg.Bridge.Store, cfg.Bridge.TrustedUserIDs)
+	store, err := bridge.Open(cfg.Bridge.Store)
 	if err != nil {
 		return fmt.Errorf("bridge.store %s: %w", cfg.Bridge.Store, err)
 	}
 	defer store.Close()
+	if n, err := store.LinkOpenIssues(); err != nil {
+		return err
+	} else if n > 0 {
+		logger.Printf("bridge: linked %d open tasks to their Linear issues", n)
+	}
+	if _, err := store.EnsureMain(); err != nil {
+		return err
+	}
 
 	token, err := newToken()
 	if err != nil {
 		return err
 	}
-	srv := &bridge.Server{Store: store, Token: token, Logger: logger}
-	if cfg.Linear.APIKey != "" {
-		srv.Linear, srv.Received = &linear.API{Key: cfg.Linear.APIKey, URL: cfg.Linear.APIURL}, cfg.Linear.ReceivedEmoji
-	}
+	srv := &bridge.Server{Store: store, Token: token, Logger: logger, Home: cfg.Home, FilesDir: filepath.Join(cfg.Agents.StateDir, "files")}
 	if cfg.Brain != "" {
 		if srv.Brain, err = brain.Open(cfg.Brain, func() []string { return projects(cfg.Workspace) }); err != nil {
 			return fmt.Errorf("brain %s: %w", cfg.Brain, err)
 		}
 	}
+	workers := cfg.Mode == "claude"
+
+	var lin *linear.Surface
+	if cfg.LinearOn() {
+		lin = &linear.Surface{Receiver: srv, ReceivedEmoji: cfg.Linear.ReceivedEmoji}
+		if cfg.Linear.APIKey != "" {
+			lin.API = &linear.API{Key: cfg.Linear.APIKey, URL: cfg.Linear.APIURL}
+		}
+		if len(cfg.Linear.TrustedUserIDs) > 0 {
+			lin.Trusted = map[string]bool{}
+			for _, id := range cfg.Linear.TrustedUserIDs {
+				lin.Trusted[id] = true
+			}
+		}
+		srv.AddSurface(lin, bridge.Policy{StartsWork: workers && *cfg.Linear.StartsWork, Reopen: true, NudgeAfter: cfg.Linear.NudgeAfter})
+	}
+	var bot *telegram.Bot
+	if cfg.TelegramOn() {
+		bot = &telegram.Bot{Token: cfg.Telegram.BotToken, URL: cfg.Telegram.APIURL, ReceivedEmoji: cfg.Telegram.ReceivedEmoji, Logger: logger,
+			TrustedUsers: map[int64]bool{}, Chats: map[int64]bool{}}
+		for _, id := range cfg.Telegram.TrustedUserIDs {
+			bot.TrustedUsers[id] = true
+		}
+		for _, id := range cfg.Telegram.ChatIDs {
+			bot.Chats[id] = true
+		}
+		srv.AddSurface(bot, bridge.Policy{StartsWork: workers && cfg.Telegram.StartsWork, NudgeAfter: cfg.Telegram.NudgeAfter})
+	}
 
 	var sv *bridge.Supervisor
-	if cfg.Agents.Enabled {
-		srv.Agents = true
-		store.RouteToWorkers(true)
-		if _, err := store.EnsureMain(); err != nil {
-			return err
-		}
+	if workers {
 		sv = &bridge.Supervisor{Store: store, Server: srv, Logger: logger, Prefix: cfg.Agents.NamePrefix, MaxWorkers: cfg.Agents.MaxWorkers,
 			Launcher: &claudeLauncher{
 				command: cfg.Agents.Command, dir: cfg.Bridge.MainDirectory, discovery: cfg.Bridge.DiscoveryFile,
@@ -109,51 +140,66 @@ func run(configPath string) error {
 	if err != nil {
 		return fmt.Errorf("cannot listen on bridge.listenAddr %s: %w (is another mahamantri running?)", cfg.Bridge.ListenAddr, err)
 	}
-	linearLn, err := net.Listen("tcp", cfg.Linear.ListenAddr)
-	if err != nil {
-		bridgeLn.Close()
-		return fmt.Errorf("cannot listen on linear.listenAddr %s: %w (is another mahamantri running?)", cfg.Linear.ListenAddr, err)
-	}
 	base := httpURL(bridgeLn.Addr().String())
 	if err := writeDiscovery(cfg.Bridge.DiscoveryFile, base, token, cfg.Bridge.MainDirectory); err != nil {
 		return fmt.Errorf("bridge.discoveryFile %s: %w", cfg.Bridge.DiscoveryFile, err)
 	}
 	defer os.Remove(cfg.Bridge.DiscoveryFile)
 
-	bridgeSrv := &http.Server{Handler: srv, ReadHeaderTimeout: 5 * time.Second}
-	linearSrv := &http.Server{ReadHeaderTimeout: 5 * time.Second, Handler: &linear.Handler{
-		Secret:  cfg.Linear.SigningSecret,
-		Self:    linear.Identity{UserID: cfg.Linear.BotUserID, Name: cfg.Linear.BotName, Handle: cfg.Linear.BotHandle},
-		Threads: store,
-		Sink:    srv,
-		Logger:  logger,
-	}}
-	errs := make(chan error, 2)
-	go func() { errs <- bridgeSrv.Serve(bridgeLn) }()
-	go func() { errs <- linearSrv.Serve(linearLn) }()
+	servers := []*http.Server{{Handler: srv, ReadHeaderTimeout: 5 * time.Second}}
+	listeners := []net.Listener{bridgeLn}
+	if lin != nil {
+		linearLn, err := net.Listen("tcp", cfg.Linear.ListenAddr)
+		if err != nil {
+			bridgeLn.Close()
+			return fmt.Errorf("cannot listen on linear.listenAddr %s: %w (is another mahamantri running?)", cfg.Linear.ListenAddr, err)
+		}
+		listeners = append(listeners, linearLn)
+		servers = append(servers, &http.Server{ReadHeaderTimeout: 5 * time.Second, Handler: &linear.Handler{
+			Secret:  cfg.Linear.SigningSecret,
+			Self:    linear.Identity{UserID: cfg.Linear.BotUserID, Name: cfg.Linear.BotName, Handle: cfg.Linear.BotHandle},
+			Threads: store,
+			Sink:    lin,
+			Logger:  logger,
+		}})
+	}
+	errs := make(chan error, len(servers))
+	for i := range servers {
+		go func() { errs <- servers[i].Serve(listeners[i]) }()
+	}
+	if bot != nil {
+		go bot.Run(ctx, srv)
+	}
 	if oc != nil {
 		go oc.deliver(ctx, srv)
-	}
-	if cfg.Mode == "claude" && len(cfg.Bridge.KeepMain) > 0 {
-		go newKeepMain(cfg.Bridge.KeepMain, srv.Live, logger).loop(ctx, 30*time.Second)
 	}
 	if sv != nil {
 		go sv.Loop(ctx, 15*time.Second)
 	}
 	statusDone := make(chan struct{})
-	go func() { srv.Watch(ctx, 20*time.Second, cfg.Linear.NudgeAfter); close(statusDone) }()
+	go func() { srv.Watch(ctx, 20*time.Second); close(statusDone) }()
 
 	rec, err := store.Recovery()
 	if err != nil {
 		return err
 	}
-	if sv != nil {
-		fmt.Fprintf(os.Stderr, "  agents: on, up to %d workers, sessions named %s-*\n", cfg.Agents.MaxWorkers, cfg.Agents.NamePrefix)
+	var surfaces []string
+	if lin != nil {
+		surfaces = append(surfaces, "linear (webhook on "+listeners[1].Addr().String()+")")
 	}
-	logger.Printf("mahamantri (%s): bridge on %s, Linear webhook on %s, store %s", cfg.Mode, base, linearLn.Addr(), cfg.Bridge.Store)
-	fmt.Fprintf(os.Stderr, "mahamantri (%s): bridge %s, Linear webhook %s\n"+
-		"  store %s - %d pending pings, %d open tasks, %d unresolved actions\n",
-		cfg.Mode, base, linearLn.Addr(), cfg.Bridge.Store, len(rec.Pending), len(rec.Open), len(rec.Uncertain))
+	if bot != nil {
+		surfaces = append(surfaces, "telegram")
+	}
+	if len(surfaces) == 0 {
+		surfaces = append(surfaces, "none")
+	}
+	logger.Printf("mahamantri (%s): bridge on %s, surfaces: %s, store %s", cfg.Mode, base, strings.Join(surfaces, ", "), cfg.Bridge.Store)
+	fmt.Fprintf(os.Stderr, "mahamantri (%s): bridge %s, surfaces: %s\n"+
+		"  store %s - %d pending messages, %d open tasks, %d unresolved actions\n",
+		cfg.Mode, base, strings.Join(surfaces, ", "), cfg.Bridge.Store, len(rec.Pending), len(rec.Open), len(rec.Uncertain))
+	if sv != nil {
+		fmt.Fprintf(os.Stderr, "  agents: a main and up to %d workers, sessions named %s-*\n", cfg.Agents.MaxWorkers, cfg.Agents.NamePrefix)
+	}
 	if oc != nil {
 		fmt.Fprintf(os.Stderr, "  main session: opencode session %s\n", oc.session)
 	}
@@ -165,10 +211,11 @@ func run(configPath string) error {
 	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	linearSrv.Shutdown(shutdownCtx)
-	bridgeSrv.Shutdown(shutdownCtx)
+	for _, s := range servers {
+		s.Shutdown(shutdownCtx)
+	}
 	stop()
-	<-statusDone // leaves Senapati's status offline
+	<-statusDone // leaves the status offline
 	if err != nil && err != http.ErrServerClosed {
 		return err
 	}

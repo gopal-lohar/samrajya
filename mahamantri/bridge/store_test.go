@@ -6,35 +6,37 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/gopal-lohar/samrajya/mahamantri/linear"
 	bolt "go.etcd.io/bbolt"
 )
 
-func openStore(t *testing.T, trusted ...string) (*Store, string) {
+func openStore(t *testing.T, trustedIDs ...string) (*Store, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "native.db")
-	s, err := Open(path, trusted)
+	s, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+	setTrusted(s, trustedIDs...)
+	s.SetPolicy("linear", Policy{Reopen: true, NudgeAfter: 15 * time.Minute})
 	t.Cleanup(func() { s.Close() })
 	return s, path
 }
 
-func ping(comment, thread string) linear.Ping {
-	return linear.Ping{Kind: "mention", Issue: "ENG-1", IssueID: "iss-1", IssueTitle: "Fix login",
+func ping(comment, thread string) tping {
+	return tping{Kind: "mention", Issue: "ENG-1", IssueID: "iss-1", IssueTitle: "Fix login",
 		Author: "Asha", AuthorID: "u-asha", Body: "please fix", CommentID: comment, ThreadID: thread}
 }
 
 func TestIngestKeepsEachCommentOnce(t *testing.T) {
 	s, _ := openStore(t)
 	for _, d := range []string{"d1", "d2"} { // Linear redelivering under a new delivery id
-		if err := s.Ingest(ping("c1", "c1"), d); err != nil {
+		if err := s.ingestPing(ping("c1", "c1"), d); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := s.Ingest(ping("c2", "c1"), "d3"); err != nil {
+	if err := s.ingestPing(ping("c2", "c1"), "d3"); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := s.Pending(0)
@@ -48,16 +50,16 @@ func TestIngestKeepsEachCommentOnce(t *testing.T) {
 
 func TestIngestMarksUntrustedAuthors(t *testing.T) {
 	s, _ := openStore(t, "u-owner")
-	s.Ingest(ping("c1", "c1"), "d1")
+	s.ingestPing(ping("c1", "c1"), "d1")
 	p := ping("c2", "c2")
 	p.AuthorID = "u-owner"
-	s.Ingest(p, "d2")
+	s.ingestPing(p, "d2")
 	got, _ := s.Pending(0)
 	if got[0].Trusted || !got[1].Trusted {
 		t.Errorf("trusted = %v %v", got[0].Trusted, got[1].Trusted)
 	}
 	open, _ := openStore(t)
-	open.Ingest(ping("c1", "c1"), "d1")
+	open.ingestPing(ping("c1", "c1"), "d1")
 	if e, _ := open.Event("linear:c1"); !e.Trusted {
 		t.Error("with no trusted list, everyone is trusted")
 	}
@@ -67,16 +69,16 @@ func TestIngestBoundsTheBody(t *testing.T) {
 	s, _ := openStore(t)
 	p := ping("c1", "c1")
 	p.Body = strings.Repeat("é", maxBody)
-	s.Ingest(p, "d1")
+	s.ingestPing(p, "d1")
 	e, _ := s.Event("linear:c1")
-	if len(e.Body) > maxBody+100 || !strings.Contains(e.Body, "read the rest on Linear") || !strings.HasPrefix(e.Body, "é") {
+	if len(e.Body) > maxBody+100 || !strings.Contains(e.Body, "read the rest at the source") || !strings.HasPrefix(e.Body, "é") {
 		t.Errorf("body length %d", len(e.Body))
 	}
 }
 
 func TestAcceptIsAtomicAndIdempotent(t *testing.T) {
 	s, _ := openStore(t)
-	s.Ingest(ping("c1", "c1"), "d1")
+	s.ingestPing(ping("c1", "c1"), "d1")
 
 	if _, err := s.Accept([]string{"linear:c1", "linear:missing"}, "", &NewTask{Title: "Fix login"}, "investigate"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("err = %v", err)
@@ -92,7 +94,7 @@ func TestAcceptIsAtomicAndIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if task.ID != "T1" || task.Issue != "ENG-1" || task.ThreadID != "c1" || task.Status != Queued || task.NextAction != "investigate" {
+	if task.ID != "T1" || len(task.Links) != 1 || task.Links[0] != "ENG-1" || task.ThreadID != "c1" || task.Status != Queued || task.NextAction != "investigate" {
 		t.Errorf("task = %+v", task)
 	}
 	again, err := s.Accept([]string{"linear:c1"}, "", &NewTask{Title: "Duplicate"}, "again")
@@ -109,13 +111,13 @@ func TestAcceptIsAtomicAndIdempotent(t *testing.T) {
 
 func TestAcceptFollowUpIntoExistingTaskReopensIt(t *testing.T) {
 	s, _ := openStore(t)
-	s.Ingest(ping("c1", "c1"), "d1")
+	s.ingestPing(ping("c1", "c1"), "d1")
 	task, _ := s.Accept([]string{"linear:c1"}, "", &NewTask{Title: "Fix"}, "fix it")
 	if _, err := s.UpdateTask(task.ID, TaskUpdate{Status: Done}); err == nil {
 		t.Fatal("done without a result must be refused")
 	}
 	s.UpdateTask(task.ID, TaskUpdate{Status: Done, Result: "fixed, tests pass"})
-	s.Ingest(ping("c2", "c1"), "d2")
+	s.ingestPing(ping("c2", "c1"), "d2")
 	task, err := s.Accept([]string{"linear:c2"}, task.ID, nil, "answer the follow-up")
 	if err != nil {
 		t.Fatal(err)
@@ -127,7 +129,7 @@ func TestAcceptFollowUpIntoExistingTaskReopensIt(t *testing.T) {
 
 func TestAcceptValidatesItsArguments(t *testing.T) {
 	s, _ := openStore(t)
-	s.Ingest(ping("c1", "c1"), "d1")
+	s.ingestPing(ping("c1", "c1"), "d1")
 	for name, call := range map[string]func() error{
 		"no events":   func() error { _, err := s.Accept(nil, "", &NewTask{Title: "x"}, "n"); return err },
 		"both":        func() error { _, err := s.Accept([]string{"linear:c1"}, "T9", &NewTask{Title: "x"}, "n"); return err },
@@ -178,13 +180,13 @@ func TestActionsAreJournaledAndLearnTheirThread(t *testing.T) {
 
 func TestStatePersistsAndTheStoreIsExclusive(t *testing.T) {
 	s, path := openStore(t)
-	s.Ingest(ping("c1", "c1"), "d1")
+	s.ingestPing(ping("c1", "c1"), "d1")
 	s.Add("thread-1", "ENG-1")
-	if _, err := Open(path, nil); err == nil || !strings.Contains(err.Error(), "in use") {
+	if _, err := Open(path); err == nil || !strings.Contains(err.Error(), "in use") {
 		t.Fatalf("second open: %v", err)
 	}
 	s.Close()
-	again, err := Open(path, nil)
+	again, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +207,7 @@ func TestUnknownSchemaIsRefusedNotReplaced(t *testing.T) {
 		return b.Put([]byte("schema"), []byte("99"))
 	})
 	db.Close()
-	if _, err := Open(path, nil); err == nil || !strings.Contains(err.Error(), "schema") {
+	if _, err := Open(path); err == nil || !strings.Contains(err.Error(), "schema") {
 		t.Errorf("err = %v", err)
 	}
 	if info, _ := os.Stat(path); info.Mode().Perm() != 0o600 {
@@ -220,7 +222,7 @@ func TestMetaPersists(t *testing.T) {
 	}
 	s.SetMeta("opencode.session", "ses_1")
 	s.Close()
-	again, _ := Open(path, nil)
+	again, _ := Open(path)
 	defer again.Close()
 	if got := again.Meta("opencode.session"); got != "ses_1" {
 		t.Errorf("meta = %q", got)

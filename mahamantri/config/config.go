@@ -14,24 +14,30 @@ import (
 )
 
 type Config struct {
-	// Mode is what the main session runs on. Either way it is one hands-on
-	// assistant session that does the work, and mahamantri is its bridge:
-	// the durable inbox of Linear pings, the tasks they become, the journal
-	// of external actions and the brain.
+	// Mode is how sessions run. Either way mahamantri keeps the inbox of
+	// messages from every surface, the tasks they become, the journal of
+	// external actions and the brain.
 	//
-	//   claude   - an interactive Claude Code session you start (reachable
-	//              through Remote Control) with the Samrajya channel plugin,
-	//              which pulls pings from the bridge. The default.
-	//   opencode - a session on an opencode server; mahamantri creates it
-	//              and prompts it with each ping. It reaches the bridge
-	//              through the same plugin's MCP server.
+	//   claude   - the default. Mahamantri runs a main Claude Code session
+	//              (the person's assistant) and a worker session per piece of
+	//              work, as background sessions it supervises (agents:).
+	//   opencode - one main session on an opencode server, which mahamantri
+	//              prompts with each message. No workers: it does the work
+	//              itself.
 	Mode string `yaml:"mode"`
 	// Workspace is the directory holding the projects this system works on,
 	// one directory per project (e.g. ../repos). Empty: none.
 	Workspace string `yaml:"workspace"`
 	// Brain is the directory holding Samrajya's memory of the work (see
 	// package brain), e.g. ../brain. Empty: no memory.
-	Brain  string `yaml:"brain"`
+	Brain string `yaml:"brain"`
+	// Home is the conversation where Samrajya tells the person about
+	// itself - a main session that is stuck or cannot start - e.g.
+	// telegram:<your chat id>. Empty: only the log.
+	Home string `yaml:"home"`
+
+	// Linear is the Linear surface: comments that mention Senapati or reply
+	// in its threads. On when signingSecret is set.
 	Linear struct {
 		SigningSecret string `yaml:"signingSecret"`
 		ListenAddr    string `yaml:"listenAddr"`
@@ -39,22 +45,51 @@ type Config struct {
 		BotName       string `yaml:"botName"`
 		BotHandle     string `yaml:"botHandle"`
 		// APIKey is a Linear API key of Senapati's own account (default:
-		// $LINEAR_API_KEY). With it, mahamantri reacts to each ping as it
-		// arrives, shows on Senapati's Linear status when it is offline or
-		// blocked, and tells the person when a ping waits too long.
-		// Optional.
+		// $LINEAR_API_KEY). Needed to reply (samrajya_reply); with it each
+		// ping is also marked received, Senapati's status shows problems,
+		// and a ping left waiting is answered with why.
 		APIKey string `yaml:"apiKey"`
 		// APIURL replaces Linear's GraphQL endpoint (for testing).
 		APIURL string `yaml:"apiURL"`
 		// ReceivedEmoji is the reaction a ping gets once stored. Default 👀.
 		ReceivedEmoji string `yaml:"receivedEmoji"`
 		// NudgeAfter is how long a ping may wait unaccepted before its author
-		// is told it is queued. Default 15m; 0s turns nudges off.
+		// is told why. Default 15m; 0s: never.
 		Nudge      string        `yaml:"nudgeAfter"`
 		NudgeAfter time.Duration `yaml:"-"`
+		// TrustedUserIDs are the Linear users whose comments may ask for
+		// work. Others' pings still arrive, marked untrusted, and go to the
+		// main. Empty: everyone is trusted.
+		TrustedUserIDs []string `yaml:"trustedUserIDs"`
+		// StartsWork: a trusted ping on an issue no task has starts a worker
+		// for it at once (default true). Off, it goes to the main.
+		StartsWork *bool `yaml:"startsWork"`
 	} `yaml:"linear"`
+
+	// Telegram is the Telegram surface: a bot the person writes to. On when
+	// botToken is set. Each mahamantri needs a bot of its own.
+	Telegram struct {
+		BotToken string `yaml:"botToken"`
+		// APIURL replaces Telegram's Bot API base (for testing).
+		APIURL string `yaml:"apiURL"`
+		// TrustedUserIDs are the Telegram users whose messages are taken;
+		// everyone else's are dropped. Required.
+		TrustedUserIDs []int64 `yaml:"trustedUserIDs"`
+		// ChatIDs are group chats messages are also taken from (private
+		// chats with a trusted user always are).
+		ChatIDs       []int64 `yaml:"chatIDs"`
+		ReceivedEmoji string  `yaml:"receivedEmoji"`
+		// NudgeAfter: default 2m; 0s: never.
+		Nudge      string        `yaml:"nudgeAfter"`
+		NudgeAfter time.Duration `yaml:"-"`
+		// StartsWork: a message in a chat no task has starts a worker
+		// (default false: the chat is the person's line to the main, which
+		// answers or dispatches).
+		StartsWork bool `yaml:"startsWork"`
+	} `yaml:"telegram"`
+
 	Bridge struct {
-		// ListenAddr is the bridge API the main session's tools talk to.
+		// ListenAddr is the bridge API the sessions' tools talk to.
 		// Loopback only. Default 127.0.0.1:4098.
 		ListenAddr string `yaml:"listenAddr"`
 		// Store is the bridge's database. Default mahamantri.db next to the
@@ -64,24 +99,14 @@ type Config struct {
 		// a fresh token on every start, for the plugin to read. Default
 		// $XDG_STATE_HOME/samrajya/bridge.json (~/.local/state/...).
 		DiscoveryFile string `yaml:"discoveryFile"`
-		// MainDirectory is where the main session runs. Only a session in
-		// this directory attaches as the main one by itself; a session
-		// elsewhere that has the plugin loaded stays passive. Default: the
-		// workspace.
+		// MainDirectory is where sessions run. Default: the workspace.
 		MainDirectory string `yaml:"mainDirectory"`
-		// TrustedUserIDs are the Linear users whose comments may ask for
-		// work. Others' pings still arrive, marked untrusted: information
-		// to check with a trusted person, not instructions. Empty: everyone
-		// is trusted.
+
+		// Replaced; kept to say so.
+		KeepMain       []string `yaml:"keepMain"`
 		TrustedUserIDs []string `yaml:"trustedUserIDs"`
-		// KeepMain is a command mahamantri runs whenever no main session has
-		// been attached for a while, to start one: Claude Code ends a
-		// background session after hours idle, and nothing else would bring
-		// it back. Mode claude only; empty: nobody restarts it. A relative
-		// program path is taken from the config's directory, e.g.
-		// ["../integrations/claude-channel/restart-main.sh", "--ensure"].
-		KeepMain []string `yaml:"keepMain"`
 	} `yaml:"bridge"`
+
 	// Opencode configures mode: opencode.
 	Opencode struct {
 		ServerURL string `yaml:"serverURL"`
@@ -102,12 +127,12 @@ type Config struct {
 	// program happened to be launched from.
 	Dir string `yaml:"-"`
 
-	// Agents runs several Claude Code sessions at once (mode claude only):
-	// a main that talks to the person and a worker per task, launched and
-	// supervised by mahamantri. See docs/design/agents.md.
+	// Agents are the sessions mode claude runs: a main that talks to the
+	// person and a worker per piece of work, launched and supervised by
+	// mahamantri. See docs/design/agents.md.
 	Agents struct {
-		Enabled    bool `yaml:"enabled"`
-		MaxWorkers int  `yaml:"maxWorkers"`
+		Enabled    *bool `yaml:"enabled"` // replaced; kept to say so
+		MaxWorkers int   `yaml:"maxWorkers"`
 		// NamePrefix starts every session name mahamantri launches; sessions
 		// with the prefix that are no agent's current launch are stopped.
 		NamePrefix string `yaml:"namePrefix"`
@@ -124,8 +149,8 @@ type Config struct {
 		// workers get theirs named after their task. Empty: none.
 		RemoteControl string `yaml:"remoteControl"`
 		WorkerRemote  bool   `yaml:"workerRemoteControl"`
-		// StateDir holds each agent's secret file (default next to the
-		// discovery file).
+		// StateDir holds each agent's secret file and files fetched for
+		// agents (default next to the discovery file).
 		StateDir string `yaml:"stateDir"`
 		// Channel is the channel plugin sessions load.
 		Channel string `yaml:"channel"`
@@ -165,11 +190,28 @@ func Load(path string) (Config, error) {
 	if c.Linear.ReceivedEmoji == "" {
 		c.Linear.ReceivedEmoji = "👀"
 	}
-	c.Linear.NudgeAfter = 15 * time.Minute
-	if c.Linear.Nudge != "" {
-		if c.Linear.NudgeAfter, err = time.ParseDuration(c.Linear.Nudge); err != nil || c.Linear.NudgeAfter < 0 {
-			return Config{}, fmt.Errorf("config %s: linear.nudgeAfter %q is not a duration like 15m", abs, c.Linear.Nudge)
+	for _, n := range []struct {
+		name string
+		in   string
+		out  *time.Duration
+		def  time.Duration
+	}{{"linear.nudgeAfter", c.Linear.Nudge, &c.Linear.NudgeAfter, 15 * time.Minute}, {"telegram.nudgeAfter", c.Telegram.Nudge, &c.Telegram.NudgeAfter, 2 * time.Minute}} {
+		*n.out = n.def
+		if n.in != "" {
+			if *n.out, err = time.ParseDuration(n.in); err != nil || *n.out < 0 {
+				return Config{}, fmt.Errorf("config %s: %s %q is not a duration like 15m", abs, n.name, n.in)
+			}
 		}
+	}
+	if c.Linear.StartsWork == nil {
+		yes := true
+		c.Linear.StartsWork = &yes
+	}
+	if c.Telegram.BotToken == "" {
+		c.Telegram.BotToken = os.Getenv("TELEGRAM_BOT_TOKEN")
+	}
+	if c.Telegram.ReceivedEmoji == "" {
+		c.Telegram.ReceivedEmoji = "👀"
 	}
 	if c.Linear.BotUserID != "" && c.Linear.BotName == "" {
 		c.Linear.BotName = "Senapati"
@@ -215,9 +257,6 @@ func Load(path string) (Config, error) {
 	}
 	paths := []*string{&c.Workspace, &c.Brain, &c.Bridge.Store, &c.Bridge.DiscoveryFile, &c.Bridge.MainDirectory, &c.Opencode.InstructionsFile,
 		&c.Agents.MainRole, &c.Agents.WorkerRole, &c.Agents.StateDir}
-	if len(c.Bridge.KeepMain) > 0 && strings.ContainsRune(c.Bridge.KeepMain[0], '/') {
-		paths = append(paths, &c.Bridge.KeepMain[0])
-	}
 	for _, p := range paths {
 		if *p != "" && !filepath.IsAbs(*p) {
 			*p = filepath.Join(c.Dir, *p)
@@ -240,9 +279,34 @@ func DefaultDiscoveryFile() string {
 	return filepath.Join(dir, "samrajya", "bridge.json")
 }
 
+// LinearOn and TelegramOn say which surfaces are configured.
+func (c Config) LinearOn() bool   { return c.Linear.SigningSecret != "" }
+func (c Config) TelegramOn() bool { return c.Telegram.BotToken != "" }
+
 func (c Config) Validate() error {
+	switch {
+	case len(c.Bridge.KeepMain) > 0:
+		return fmt.Errorf("bridge.keepMain is gone: mahamantri now runs and supervises the main session itself (agents:). Remove keepMain")
+	case len(c.Bridge.TrustedUserIDs) > 0:
+		return fmt.Errorf("bridge.trustedUserIDs moved to linear.trustedUserIDs")
+	case c.Agents.Enabled != nil:
+		return fmt.Errorf("agents.enabled is gone: mode claude always runs agents. Remove it")
+	}
 	switch c.Mode {
 	case "claude":
+		switch {
+		case c.Bridge.MainDirectory == "":
+			return fmt.Errorf("bridge.mainDirectory (or workspace) is required: where sessions run")
+		case c.Agents.MaxWorkers < 1:
+			return fmt.Errorf("agents.maxWorkers must be at least 1")
+		case !validPrefix(c.Agents.NamePrefix):
+			return fmt.Errorf("agents.namePrefix %q must be letters, digits and dashes", c.Agents.NamePrefix)
+		}
+		for name, f := range map[string]string{"agents.mainRole": c.Agents.MainRole, "agents.workerRole": c.Agents.WorkerRole} {
+			if st, err := os.Stat(f); err != nil || st.IsDir() {
+				return fmt.Errorf("%s %q is not a file", name, f)
+			}
+		}
 	case "opencode":
 		u, err := url.Parse(c.Opencode.ServerURL)
 		switch {
@@ -258,38 +322,30 @@ func (c Config) Validate() error {
 	default:
 		return fmt.Errorf("mode %q must be \"claude\" or \"opencode\"", c.Mode)
 	}
-	switch {
-	case c.Linear.SigningSecret == "":
-		return fmt.Errorf("linear.signingSecret is required (or set LINEAR_SIGNING_SECRET)")
-	case c.Linear.ListenAddr == "":
-		return fmt.Errorf("linear.listenAddr is required")
-	case c.Linear.BotUserID == "":
-		return fmt.Errorf("linear.botUserID is required: Senapati's own Linear user id. Without it its own comments " +
-			"come back to it as pings and replies to it can't be recognised. It is actor.id on any comment Senapati made")
-	case c.Linear.BotHandle == "":
-		return fmt.Errorf("linear.botHandle is required: what comments @-mention Senapati as (the part after the @), " +
-			"or no mention would ever reach it")
-	case !loopback(c.Bridge.ListenAddr):
-		return fmt.Errorf("bridge.listenAddr %q must be a loopback address such as 127.0.0.1:4098", c.Bridge.ListenAddr)
-	}
-	if c.Agents.Enabled {
+	if c.LinearOn() {
 		switch {
-		case c.Mode != "claude":
-			return fmt.Errorf("agents.enabled needs mode claude")
-		case c.Bridge.MainDirectory == "":
-			return fmt.Errorf("agents.enabled needs bridge.mainDirectory (or workspace): where sessions run")
-		case len(c.Bridge.KeepMain) > 0:
-			return fmt.Errorf("agents.enabled replaces bridge.keepMain: remove keepMain, the supervisor keeps the main running")
-		case c.Agents.MaxWorkers < 1:
-			return fmt.Errorf("agents.maxWorkers must be at least 1")
-		case !validPrefix(c.Agents.NamePrefix):
-			return fmt.Errorf("agents.namePrefix %q must be letters, digits and dashes", c.Agents.NamePrefix)
+		case c.Linear.ListenAddr == "":
+			return fmt.Errorf("linear.listenAddr is required")
+		case c.Linear.BotUserID == "":
+			return fmt.Errorf("linear.botUserID is required: Senapati's own Linear user id. Without it its own comments " +
+				"come back to it as pings and replies to it can't be recognised. It is actor.id on any comment Senapati made")
+		case c.Linear.BotHandle == "":
+			return fmt.Errorf("linear.botHandle is required: what comments @-mention Senapati as (the part after the @), " +
+				"or no mention would ever reach it")
 		}
-		for name, f := range map[string]string{"agents.mainRole": c.Agents.MainRole, "agents.workerRole": c.Agents.WorkerRole} {
-			if st, err := os.Stat(f); err != nil || st.IsDir() {
-				return fmt.Errorf("%s %q is not a file", name, f)
-			}
+	}
+	if c.TelegramOn() && len(c.Telegram.TrustedUserIDs) == 0 {
+		return fmt.Errorf("telegram.trustedUserIDs is required: the Telegram users whose messages are taken (yours)")
+	}
+	if c.Home != "" {
+		surface, id, _ := strings.Cut(c.Home, ":")
+		on := map[string]bool{"linear": c.LinearOn(), "telegram": c.TelegramOn()}
+		if id == "" || !on[surface] {
+			return fmt.Errorf("home %q must be a conversation on a configured surface, e.g. telegram:<chat id>", c.Home)
 		}
+	}
+	if !loopback(c.Bridge.ListenAddr) {
+		return fmt.Errorf("bridge.listenAddr %q must be a loopback address such as 127.0.0.1:4098", c.Bridge.ListenAddr)
 	}
 	for name, dir := range map[string]string{"workspace": c.Workspace, "bridge.mainDirectory": c.Bridge.MainDirectory} {
 		if dir == "" {
