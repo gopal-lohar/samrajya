@@ -88,6 +88,7 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, _ string) {
 		ThreadID     string   `json:"threadId"`
 		Route        *bool    `json:"route"`
 		Links        []string `json:"links"`
+		Events       []string `json:"events"`
 	}
 	if !decode(w, r, &body) {
 		return
@@ -105,7 +106,7 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, _ string) {
 		route = *body.Route
 	}
 	t, err := s.Store.Dispatch(NewTask{Title: body.Title, ThreadID: body.ThreadID, Project: body.Project, Links: body.Links},
-		body.Conversation, route, body.Brief)
+		body.Conversation, route, body.Brief, body.Events...)
 	if err == nil {
 		s.Wake()
 	}

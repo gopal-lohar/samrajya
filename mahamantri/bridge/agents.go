@@ -216,7 +216,10 @@ func (s *Store) TaskForConversation(conv string) (Task, error) {
 // brief as its first event. With conv, the worker may reply there; with
 // route too, conv's new messages go to the worker, and when conv is already
 // routed to a task the work goes to that task (and its worker) instead.
-func (s *Store) Dispatch(n NewTask, conv string, route bool, brief string) (Task, error) {
+//
+// events (the messages that asked for the work) are accepted into the task
+// in the same transaction, so they are not left pending with the main.
+func (s *Store) Dispatch(n NewTask, conv string, route bool, brief string, events ...string) (Task, error) {
 	if strings.TrimSpace(brief) == "" {
 		return Task{}, errors.New("say what the worker is to do (brief)")
 	}
@@ -260,6 +263,25 @@ func (s *Store) Dispatch(n NewTask, conv string, route bool, brief string) (Task
 			t.Status = Queued
 		}
 		t.UpdatedAt = s.now()
+		for _, id := range events {
+			var e Event
+			if err := getJSON(tx.Bucket(bEvents), id, &e); err != nil {
+				return fmt.Errorf("event %s: %w", id, err)
+			}
+			if e.AcceptedAt != nil {
+				continue
+			}
+			e.AcceptedAt, e.TaskID = &t.UpdatedAt, t.ID
+			if err := putJSON(tx.Bucket(bEvents), id, e); err != nil {
+				return err
+			}
+			t.Events = append(t.Events, id)
+			for _, l := range e.Links {
+				if !slices.Contains(t.Links, l) {
+					t.Links = append(t.Links, l)
+				}
+			}
+		}
 		if err := putJSON(tasks, t.ID, t); err != nil {
 			return err
 		}

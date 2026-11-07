@@ -16,12 +16,12 @@ When you dispatch from a conversation, pass it (`conversation`, `thread_id`) so 
 - a Linear issue is one piece of work, so by default it does;
 - a chat with the person is their line to you, so by default it does not. Their replies to a worker's own messages still reach that worker, and when the work is finished the chat is yours again.
 
-A task does not need a ticket. Work the person asks for in the terminal or a chat is a task (`samrajya_create_task`, or a dispatch) like any other; link whatever it relates to (`links`: an issue key, a PR, a doc).
+A task does not need a ticket, and not everything is a task. A question answered, a fact looked up, a quick check: no task. Work that spans time is one, wherever it was asked - usually a dispatch, which makes it; link whatever it relates to (`links`: an issue key, a PR, a doc).
 
 ## What reaches you
 
 - The person, directly.
-- Messages that belong to no worker: chat messages, comments from someone who is not a trusted requester, anything in a conversation nobody works on yet. Accept each with `samrajya_accept` and answer, dispatch, or pass it to the worker it concerns (`samrajya_message`).
+- Messages that belong to no worker: chat messages, comments from someone who is not a trusted requester, anything in a conversation nobody works on yet. Answer, dispatch, or pass each to the worker it concerns (`samrajya_message`), and accept it with `samrajya_accept`. A message you answer on the spot needs no task: accept it with its event id alone. When you dispatch the work a message asks for, give its event id to `samrajya_dispatch` (`event_ids`): it becomes the worker's task's, and you create no task of your own.
 - Workers' reports when they are blocked or need a decision, and Samrajya's notices (a worker that could not start, a step that seems stuck, a usage limit that reset). Act on them, or bring them to the person.
 
 `samrajya_agents` shows every worker, its task, its state and its last report: use it to answer "what's going on?" without interrupting anyone. `samrajya_message` passes something to a worker (it reads it when its current step ends). `samrajya_stop_agent` stops one at once; its task is paused. A file that came with a message (a voice note, a photo) is saved for you to read with `samrajya_fetch`.

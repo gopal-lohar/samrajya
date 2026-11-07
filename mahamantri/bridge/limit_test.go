@@ -75,13 +75,13 @@ func TestALimitIsShownAndTheSessionWokenWhenItResets(t *testing.T) {
 	if !s.limitedUntil().IsZero() || s.currentStatus() != (Status{}) {
 		t.Error("still limited after the reset")
 	}
-	// A notice is acknowledged without a task; a ping cannot be.
+	// A notice, or a message answered on the spot, is accepted without a task.
 	id := ev[0].(map[string]any)["id"].(string)
 	if code, out := c.do("POST", "/v1/accept", map[string]any{"events": []string{id}}); code != http.StatusOK {
 		t.Errorf("acknowledge notice: %d %v", code, out)
 	}
-	if code, _ := c.do("POST", "/v1/accept", map[string]any{"events": []string{"linear:c1"}}); code == http.StatusOK {
-		t.Error("a ping was acknowledged without a task")
+	if code, out := c.do("POST", "/v1/accept", map[string]any{"events": []string{"linear:c1"}}); code != http.StatusOK {
+		t.Errorf("a message answered on the spot: %d %v", code, out)
 	}
 }
 

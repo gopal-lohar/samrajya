@@ -133,7 +133,6 @@ func TestAcceptValidatesItsArguments(t *testing.T) {
 	for name, call := range map[string]func() error{
 		"no events":   func() error { _, err := s.Accept(nil, "", &NewTask{Title: "x"}, "n"); return err },
 		"both":        func() error { _, err := s.Accept([]string{"linear:c1"}, "T9", &NewTask{Title: "x"}, "n"); return err },
-		"neither":     func() error { _, err := s.Accept([]string{"linear:c1"}, "", nil, "n"); return err },
 		"no next":     func() error { _, err := s.Accept([]string{"linear:c1"}, "", &NewTask{Title: "x"}, " "); return err },
 		"no title":    func() error { _, err := s.Accept([]string{"linear:c1"}, "", &NewTask{}, "n"); return err },
 		"bad task id": func() error { _, err := s.Accept([]string{"linear:c1"}, "T9", nil, "n"); return err },

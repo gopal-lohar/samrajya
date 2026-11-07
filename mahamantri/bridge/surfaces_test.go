@@ -88,10 +88,17 @@ func TestAChatStaysWithTheMainWhileItsWorkersReportThere(t *testing.T) {
 	}
 	r.tick()
 	main := r.attach(MainAgent)
-	main.do("POST", "/v1/accept", map[string]any{"events": []string{"chat:1:1"}, "newTask": map[string]string{"title": "Release notes"}, "nextAction": "dispatch"})
-	code, task := main.do("POST", "/v1/dispatch", map[string]any{"title": "Release notes", "brief": "write them", "conversation": "chat:1", "threadId": "1"})
+	code, task := main.do("POST", "/v1/dispatch", map[string]any{"title": "Release notes", "brief": "write them", "conversation": "chat:1", "threadId": "1",
+		"events": []string{"chat:1:1"}})
 	if code != http.StatusOK {
 		t.Fatalf("dispatch: %d %v", code, task)
+	}
+	// The message that asked for it is the worker's task's, not left with the main.
+	if e, _ := r.s.Store.Event("chat:1:1"); e.AcceptedAt == nil || e.TaskID != task["id"] {
+		t.Errorf("asking message %+v", e)
+	}
+	if tasks, _ := r.s.Store.Tasks(true); len(tasks) != 1 {
+		t.Errorf("%d tasks for one piece of work", len(tasks))
 	}
 	w := task["agent"].(string)
 	r.tick()

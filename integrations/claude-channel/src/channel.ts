@@ -22,7 +22,7 @@ const tools = [
   },
   {
     name: 'samrajya_accept',
-    description: 'Accept messages into a task before working on them: an existing task (task_id) or a new one (new_task_title, the main only), with next_action. Idempotent. A notice from Samrajya is acknowledged with its event id alone.',
+    description: 'Accept messages so they are not handed to you again: into a task for work that spans time - an existing one (task_id) or a new one (new_task_title, the main only), with next_action - or with the event ids alone for a message you answer on the spot, or a notice. Idempotent.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -155,6 +155,7 @@ const tools = [
         thread_id: str('Thread within it to report in'),
         route: { type: 'boolean', description: 'The conversation\'s new messages go to the worker (default: true for Linear issues, false for chats)' },
         links: { type: 'array', items: { type: 'string' }, description: 'References for the worker: an issue key, a PR or doc URL' },
+        event_ids: { type: 'array', items: { type: 'string' }, description: 'The messages that asked for this work: they go into the worker\'s task' },
         project: str('Workspace project'),
       },
       required: ['brief'],
@@ -315,7 +316,7 @@ export function createChannel(opts: ChannelOptions) {
         return bridge.request('GET', '/v1/agents');
       case 'samrajya_dispatch':
         return bridge.request('POST', '/v1/dispatch', {
-          title: a.title, brief: a.brief, project: a.project, conversation: a.conversation, threadId: a.thread_id, route: a.route, links: a.links,
+          title: a.title, brief: a.brief, project: a.project, conversation: a.conversation, threadId: a.thread_id, route: a.route, links: a.links, events: a.event_ids,
         });
       case 'samrajya_fetch':
         return bridge.request('POST', '/v1/fetch', { eventId: a.event_id, ref: a.ref });

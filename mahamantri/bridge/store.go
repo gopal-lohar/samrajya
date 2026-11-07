@@ -645,7 +645,8 @@ func (s *Store) NoticeFor(agent, id, kind, body string) error {
 	return err
 }
 
-// acknowledge marks notices seen. A ping must go into a task instead.
+// acknowledge marks events handled without a task: a notice seen, a
+// message answered on the spot. Work that spans time goes into a task.
 func (s *Store) acknowledge(caller string, ids []string) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bEvents)
@@ -657,9 +658,6 @@ func (s *Store) acknowledge(caller string, ids []string) error {
 			}
 			if err := mayTouch(caller, e.Owner()); err != nil {
 				return fmt.Errorf("event %s: %w", id, err)
-			}
-			if e.Source != "samrajya" {
-				return fmt.Errorf("event %s is a message: accept it into a task (task id or new task)", id)
 			}
 			if e.AcceptedAt == nil {
 				e.AcceptedAt = &now
