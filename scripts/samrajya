@@ -1,0 +1,239 @@
+#!/usr/bin/env bash
+# Run Samrajya: one command for everything you do to it.
+#
+#   samrajya status         the service, the sessions and what waits
+#   samrajya restart        restart mahamantri; sessions reattach by themselves
+#   samrajya restart-main   stop the main session; mahamantri starts a new one
+#   samrajya build          test and build mahamantri (to mahamantri.next) and the plugin
+#   samrajya update         build, then put the new mahamantri in place and restart
+#   samrajya cutover        switch a setup from before surfaces to this version:
+#                           convert the config, install the plugin, stop the old
+#                           main session, start the new mahamantri. Backs up first.
+#   samrajya rollback       undo the last cutover, from its backup
+#
+# mahamantri runs as the systemd user service $SAMRAJYA_SERVICE (default
+# samrajya-mahamantri); its unit names the binary and the config.
+set -euo pipefail
+
+root=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
+service=${SAMRAJYA_SERVICE:-samrajya-mahamantri}
+state=${XDG_STATE_HOME:-$HOME/.local/state}/samrajya
+export PATH="$HOME/.local/bin:$PATH"
+
+die() { echo "samrajya: $*" >&2; exit 1; }
+say() { echo "== $*"; }
+
+# The binary, its directory and the config, from the service's unit.
+unit() {
+  local exec dir
+  exec=$(systemctl --user show -p ExecStart --value "$service" | sed -n 's/.*argv\[\]=\([^;]*\);.*/\1/p')
+  dir=$(systemctl --user show -p WorkingDirectory --value "$service")
+  [[ -n $exec ]] || die "no service $service (systemctl --user cat $service)"
+  bin=${exec%% *}
+  cfg=${exec#* }
+  [[ $cfg == "$exec" ]] && cfg=mahamantri.yaml
+  [[ $cfg == /* ]] || cfg=$dir/$cfg
+  [[ $bin == /* ]] || bin=$dir/$bin
+}
+
+discovery() { cat "${SAMRAJYA_BRIDGE_FILE:-$state/bridge.json}" 2>/dev/null; }
+
+bridge_status() {
+  local d url token
+  d=$(discovery) || return 1
+  url=$(jq -r .url <<<"$d")
+  token=$(jq -r .token <<<"$d")
+  curl -fsS -H "Authorization: Bearer $token" "$url/v1/status"
+}
+
+main_dir() {
+  "$bin" check "$cfg" 2>/dev/null | sed -n 's/.*sessions in \(.*\)$/\1/p'
+}
+
+cmd_status() {
+  unit
+  systemctl --user --no-pager status "$service" | sed -n '1,3p'
+  if st=$(bridge_status); then
+    jq -r '"main session: " + (if .main.live then "attached" else "not attached" end),
+      "surfaces: " + (.surfaces | join(", ")),
+      "pending: \(.recovery.pending | length), open tasks: \(.recovery.openTasks | length), unresolved actions: \(.recovery.unresolvedActions | length)"' <<<"$st"
+  else
+    echo "bridge: not answering"
+  fi
+  local dir
+  dir=$(main_dir)
+  [[ -n $dir ]] || return 0
+  dir=$(realpath "$dir")
+  claude agents --json | jq -r --arg dir "$dir" '.[] | select(.pid != null and .cwd == $dir) | "session \(.name) (\(.id))"'
+}
+
+cmd_restart() {
+  systemctl --user restart "$service"
+  sleep 3
+  systemctl --user --no-pager status "$service" | sed -n '1,3p'
+}
+
+cmd_restart_main() {
+  unit
+  local dir id
+  dir=$(realpath "$(main_dir)")
+  id=$(claude agents --json | jq -r --arg dir "$dir" '[.[] | select(.pid != null and .cwd == $dir and (.name | test("-main-g[0-9]+$")))][0].id // empty')
+  [[ -n $id ]] || die "no main session is running; mahamantri starts one within a minute"
+  claude stop "$id"
+  echo "stopped $id; mahamantri notices within two minutes and starts a new main session"
+}
+
+cmd_build() {
+  unit
+  say "testing mahamantri"
+  (cd "$root/mahamantri" && go vet ./... && go test ./...)
+  say "building $(dirname "$bin")/mahamantri.next"
+  (cd "$root/mahamantri" && go build -o "$(dirname "$bin")/mahamantri.next" .)
+  say "testing and bundling the plugin"
+  (cd "$root/integrations/claude-channel" && pnpm test >/dev/null && pnpm bundle >/dev/null)
+  "$(dirname "$bin")/mahamantri.next" check "$cfg" || echo "(the config needs converting: samrajya cutover)"
+}
+
+# install_plugin makes the main directory's sessions load the plugin in
+# this checkout.
+install_plugin() {
+  local dir=$1 want got
+  want=$(jq -r .version "$root/integrations/claude-channel/plugin/.claude-plugin/plugin.json")
+  claude plugin marketplace update samrajya >/dev/null
+  (cd "$dir" && claude plugin update samrajya@samrajya --scope local >/dev/null) || true
+  got=$(jq -r --arg dir "$dir" '.plugins["samrajya@samrajya"][] | select(.projectPath == $dir) | .version' ~/.claude/plugins/installed_plugins.json)
+  if [[ $got != "$want" ]]; then
+    (cd "$dir" && claude plugin install samrajya@samrajya --scope local >/dev/null) || true
+    got=$(jq -r --arg dir "$dir" '.plugins["samrajya@samrajya"][] | select(.projectPath == $dir) | .version' ~/.claude/plugins/installed_plugins.json)
+  fi
+  [[ $got == "$want" ]] || die "plugin for $dir is $got, want $want: install it with 'claude plugin install samrajya@samrajya --scope local' in $dir"
+  echo "plugin $want installed for $dir"
+}
+
+wait_for_main() {
+  local i
+  for i in $(seq 1 36); do
+    if bridge_status 2>/dev/null | jq -e .main.live >/dev/null; then
+      echo "main session attached"
+      return 0
+    fi
+    sleep 5
+  done
+  return 1
+}
+
+cmd_update() {
+  cmd_build
+  unit
+  "$(dirname "$bin")/mahamantri.next" check "$cfg" >/dev/null || die "the config does not load with the new build: samrajya cutover converts it"
+  local dir
+  dir=$(realpath "$(main_dir)")
+  install_plugin "$dir"
+  cp -p "$bin" "$bin.prev"
+  mv "$(dirname "$bin")/mahamantri.next" "$bin"
+  cmd_restart
+  wait_for_main || echo "the main session has not attached yet: samrajya status"
+}
+
+cmd_cutover() {
+  unit
+  local next ts backup dir
+  next=$(dirname "$bin")/mahamantri.next
+  [[ -x $next ]] || die "build first: samrajya build"
+  ts=$(date -u +%Y%m%dT%H%M%SZ)
+  backup=$state/backup-$ts
+  mkdir -p "$backup"
+  chmod 700 "$backup"
+
+  say "converting the config"
+  "$next" migrate-config "$cfg" "$cfg.next"
+  dir=$(realpath "$("$next" check "$cfg.next" | sed -n 's/.*sessions in \(.*\)$/\1/p')")
+  store=$("$next" check "$cfg.next" | sed -n 's/.*store \(.*\), sessions in.*/\1/p')
+
+  say "backing up to $backup"
+  cp -p "$bin" "$backup/mahamantri"
+  cp -p "$cfg" "$backup/config.yaml"
+  echo "$cfg" >"$backup/config.path"
+  echo "$bin" >"$backup/binary.path"
+  echo "$dir" >"$backup/main-directory"
+  jq --arg dir "$dir" '.plugins["samrajya@samrajya"][] | select(.projectPath == $dir)' ~/.claude/plugins/installed_plugins.json >"$backup/plugin.json"
+
+  say "installing the plugin"
+  install_plugin "$dir"
+
+  say "stopping mahamantri and the old main session"
+  systemctl --user stop "$service"
+  cp -p "$store" "$backup/store.db"
+  # The old main session is not supervised, and would keep acting through
+  # its own tools: stop it (by the name the old restart script gave it).
+  claude agents --json | jq -r --arg dir "$dir" --arg name "${SAMRAJYA_OLD_MAIN:-samrajya}" \
+    '.[] | select(.pid != null and .cwd == $dir and .name == $name) | "\(.id)\t\(.name)"' |
+    while IFS=$'\t' read -r id name; do
+      echo "stopping $name ($id)"
+      claude stop "$id" || true
+    done
+
+  say "starting the new mahamantri"
+  mv "$next" "$bin"
+  mv "$cfg.next" "$cfg"
+  systemctl --user start "$service"
+  echo "$backup" >"$state/last-cutover"
+  if wait_for_main; then
+    say "done. Roll back with: samrajya rollback"
+  else
+    echo "the main session has not attached within 3 minutes: check samrajya status and $(dirname "$cfg")/mahamantri.log; roll back with: samrajya rollback" >&2
+    exit 1
+  fi
+}
+
+cmd_rollback() {
+  local backup
+  backup=$(cat "$state/last-cutover" 2>/dev/null) || die "no cutover to roll back"
+  [[ -d $backup ]] || die "backup $backup is gone"
+  local bin cfg dir store
+  bin=$(cat "$backup/binary.path")
+  cfg=$(cat "$backup/config.path")
+  dir=$(cat "$backup/main-directory")
+  store=$("$bin" check "$cfg" | sed -n 's/.*store \(.*\), sessions in.*/\1/p')
+
+  say "stopping mahamantri and the sessions it ran"
+  systemctl --user stop "$service"
+  local prefix
+  prefix=$(sed -n 's/^ *namePrefix: *"\{0,1\}\([A-Za-z0-9-]*\).*/\1/p' "$cfg" | head -1)
+  claude agents --json | jq -r --arg dir "$dir" --arg p "${prefix:-samrajya}-" \
+    '.[] | select(.pid != null and .cwd == $dir and (.name | startswith($p))) | "\(.id)\t\(.name)"' |
+    while IFS=$'\t' read -r id name; do
+      echo "stopping $name ($id)"
+      claude stop "$id" || true
+    done
+
+  say "keeping the store, marked for the old mahamantri"
+  # Everything received since the cutover stays: the old main gets it all.
+  "$bin" downgrade-store "$store"
+
+  say "restoring the binary, the config and the plugin"
+  cp -p "$bin" "$bin.after-cutover"
+  cp -p "$backup/mahamantri" "$bin"
+  cp -p "$cfg" "$cfg.after-cutover"
+  cp -p "$backup/config.yaml" "$cfg"
+  if [[ -s $backup/plugin.json ]]; then
+    local f=~/.claude/plugins/installed_plugins.json
+    jq --arg dir "$dir" --slurpfile old "$backup/plugin.json" \
+      '.plugins["samrajya@samrajya"] |= map(if .projectPath == $dir then $old[0] else . end)' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
+  fi
+
+  systemctl --user start "$service"
+  rm -f "$state/last-cutover"
+  say "rolled back; the old mahamantri starts its main session within a few minutes"
+}
+
+case ${1:-} in
+status) cmd_status ;;
+restart) cmd_restart ;;
+restart-main) cmd_restart_main ;;
+build) cmd_build ;;
+update) cmd_update ;;
+cutover) cmd_cutover ;;
+rollback) cmd_rollback ;;
+*) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

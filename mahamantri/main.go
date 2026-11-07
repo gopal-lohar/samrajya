@@ -31,14 +31,28 @@ import (
 
 func main() {
 	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: mahamantri [config.yaml]   (default ./mahamantri.yaml)")
+		fmt.Fprintln(os.Stderr, `usage: mahamantri [config.yaml]   run (default ./mahamantri.yaml)
+       mahamantri check config.yaml                   validate a config
+       mahamantri migrate-config old.yaml new.yaml    convert a config from before surfaces
+       mahamantri downgrade-store store.db            mark a store schema 1, to roll back`)
 	}
 	flag.Parse()
-	configPath := flag.Arg(0)
-	if configPath == "" {
-		configPath = "mahamantri.yaml"
+	var err error
+	switch flag.Arg(0) {
+	case "check":
+		err = checkConfig(flag.Arg(1))
+	case "migrate-config":
+		err = migrateConfig(flag.Arg(1), flag.Arg(2))
+	case "downgrade-store":
+		err = downgradeStore(flag.Arg(1))
+	default:
+		configPath := flag.Arg(0)
+		if configPath == "" {
+			configPath = "mahamantri.yaml"
+		}
+		err = run(configPath)
 	}
-	if err := run(configPath); err != nil {
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "mahamantri:", err)
 		os.Exit(1)
 	}
