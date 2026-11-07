@@ -77,8 +77,10 @@ type Config struct {
 		TrustedUserIDs []int64 `yaml:"trustedUserIDs"`
 		// ChatIDs are group chats messages are also taken from (private
 		// chats with a trusted user always are).
-		ChatIDs       []int64 `yaml:"chatIDs"`
-		ReceivedEmoji string  `yaml:"receivedEmoji"`
+		ChatIDs []int64 `yaml:"chatIDs"`
+		// ReceivedEmoji is a reaction for each stored message. Default
+		// none: Telegram's own read ticks already show it arrived.
+		ReceivedEmoji string `yaml:"receivedEmoji"`
 		// NudgeAfter: default 2m; 0s: never.
 		Nudge      string        `yaml:"nudgeAfter"`
 		NudgeAfter time.Duration `yaml:"-"`
@@ -207,9 +209,6 @@ func Load(path string) (Config, error) {
 	}
 	if c.Telegram.BotToken == "" {
 		c.Telegram.BotToken = os.Getenv("TELEGRAM_BOT_TOKEN")
-	}
-	if c.Telegram.ReceivedEmoji == "" {
-		c.Telegram.ReceivedEmoji = "👀"
 	}
 	if c.Linear.BotUserID != "" && c.Linear.BotName == "" {
 		c.Linear.BotName = "Senapati"

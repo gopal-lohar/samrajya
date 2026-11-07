@@ -149,7 +149,7 @@ func TestSurfacesAreOptionalAndTelegramIsConfigured(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !c.TelegramOn() || c.Telegram.NudgeAfter != time.Minute || c.Telegram.StartsWork || c.Telegram.ReceivedEmoji != "👀" || c.Linear.NudgeAfter != 15*time.Minute {
+	if !c.TelegramOn() || c.Telegram.NudgeAfter != time.Minute || c.Telegram.StartsWork || c.Telegram.ReceivedEmoji != "" || c.Linear.NudgeAfter != 15*time.Minute {
 		t.Errorf("telegram = %+v", c.Telegram)
 	}
 }

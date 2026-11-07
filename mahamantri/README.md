@@ -50,6 +50,8 @@ policy for new ones:
   - Messages are polled, so no public webhook is needed. Each is stored
     together with the read position, so a restart neither loses nor repeats
     one.
+  - No reaction is added: Telegram's read ticks already show a message
+    arrived (`receivedEmoji` adds one).
   - Only `trustedUserIDs` are heard, in private chats, plus any `chatIDs`
     groups.
   - A chat goes to the main session (`startsWork`, default off), which
