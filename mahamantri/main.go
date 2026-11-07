@@ -37,6 +37,7 @@ func main() {
        mahamantri downgrade-store store.db            mark a store schema 1, to roll back`)
 	}
 	flag.Parse()
+	withClaudeOnPath()
 	var err error
 	switch flag.Arg(0) {
 	case "check":
@@ -292,4 +293,21 @@ func httpURL(listenAddr string) string {
 		host = "127.0.0.1"
 	}
 	return "http://" + net.JoinHostPort(host, port)
+}
+
+// withClaudeOnPath puts Claude Code's usual install directory on PATH, which
+// a systemd user service does not have. exec looks a command up in
+// mahamantri's own PATH, so a child's environment would be too late.
+func withClaudeOnPath() {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	dir := filepath.Join(home, ".local", "bin")
+	for _, p := range filepath.SplitList(os.Getenv("PATH")) {
+		if p == dir {
+			return
+		}
+	}
+	os.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
