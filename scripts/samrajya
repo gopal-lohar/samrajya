@@ -245,6 +245,7 @@ cmd_deploy() {
   local ref=${1:-} sha rel prev dir snapshot replace_main=no gen
   [[ -n $ref ]] || die "usage: samrajya deploy REF"
   paths
+  unit
   sha=$(git -C "$code" rev-parse --verify --quiet "$ref^{commit}") || die "$ref is not a commit of $code"
   rel=$releases/$sha
   prev=$(readlink -f "$current" 2>/dev/null || true)
