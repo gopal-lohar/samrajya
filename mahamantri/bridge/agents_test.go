@@ -267,3 +267,27 @@ func TestSchemaOneIsUpgradedInPlaceWithABackup(t *testing.T) {
 		t.Errorf("old event %+v %v", e, err)
 	}
 }
+
+func TestSaidListsWhatWasPostedForATask(t *testing.T) {
+	s, _ := openStore(t)
+	t4, _ := s.CreateTask(NewTask{Title: "pics"})
+	t5, _ := s.CreateTask(NewTask{Title: "other"})
+	task := Task{ID: t4.ID, ThreadID: "57", Conversations: []string{"telegram:1"}}
+	ack, _ := s.Intend(Action{Kind: "telegram_reply", Target: "telegram:1 thread 57", Intent: "On it"})
+	s.Resolve(ack.ID, Happened, "59", "", "59", "telegram:1")
+	mine, _ := s.IntendAs(MainAgent, Action{TaskID: t4.ID, Kind: "telegram_reply", Target: "telegram:1", Intent: "Finding pics"})
+	failed, _ := s.Intend(Action{TaskID: t4.ID, Kind: "telegram_reply", Target: "telegram:1", Intent: "never sent"})
+	s.Resolve(failed.ID, Failed, "", "", "", "")
+	s.Intend(Action{TaskID: t5.ID, Kind: "telegram_reply", Target: "telegram:1", Intent: "another task"})
+	s.Intend(Action{TaskID: t4.ID, Kind: "linear_status", Target: "ENG-1", Intent: "In Progress"})
+	said, err := s.Said(task, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(said) != 2 || said[0].Intent != "On it" || said[1].ID != mine.ID || said[1].Status != Intended {
+		t.Errorf("said %+v", said)
+	}
+	if last, _ := s.Said(task, 1); len(last) != 1 || last[0].ID != mine.ID {
+		t.Errorf("limited %+v", last)
+	}
+}

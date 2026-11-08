@@ -953,6 +953,38 @@ func (s *Store) Recovery() (Recovery, error) {
 	return r, err
 }
 
+// Said is what has been posted, or tried, in a task's conversations for
+// it, oldest first and at most the last limit: replies recorded against the
+// task, and replies in its thread (the main's acknowledgement may come
+// before the task exists). A session starting on the task reads it, so it
+// does not say again what was already said.
+func (s *Store) Said(t Task, limit int) ([]Action, error) {
+	threads := map[string]bool{}
+	if t.ThreadID != "" {
+		for _, c := range t.Conversations {
+			threads[c+" thread "+t.ThreadID] = true
+		}
+	}
+	var out []Action
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bActions).ForEach(func(_, v []byte) error {
+			var a Action
+			if err := json.Unmarshal(v, &a); err != nil {
+				return err
+			}
+			if strings.HasSuffix(a.Kind, "_reply") && a.Status != Failed && (a.TaskID == t.ID || threads[a.Target]) {
+				out = append(out, a)
+			}
+			return nil
+		})
+	})
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	if len(out) > limit {
+		out = out[len(out)-limit:]
+	}
+	return out, err
+}
+
 func putJSON(b *bolt.Bucket, key string, v any) error {
 	data, err := json.Marshal(v)
 	if err != nil {

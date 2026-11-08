@@ -572,6 +572,16 @@ func (sv *Supervisor) brief(a Agent) (string, error) {
 			fmt.Fprintf(&b, " Worktree: %s", t.Worktree)
 		}
 		b.WriteString("\n")
+		if said, err := sv.Store.Said(t, 5); err == nil && len(said) > 0 {
+			b.WriteString("\nAlready said for this task (do not say it again; send progress or the result):\n")
+			for _, x := range said {
+				note := ""
+				if x.Status == Intended {
+					note = " (may not have arrived)"
+				}
+				fmt.Fprintf(&b, "- %s, in %s%s: %s\n", x.CreatedAt.UTC().Format("15:04 UTC"), x.Target, note, x.Intent)
+			}
+		}
 	}
 	var ids []string
 	for _, e := range pending {
