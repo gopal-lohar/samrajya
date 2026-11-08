@@ -42,7 +42,7 @@ changes nothing that runs until a deploy.
    an untrusted author, another conversation or a lapsed request (24 hours)
    decides nothing. One change runs at a time.
 3. mahamantri hands the change to `scripts/samrajya` in a transient systemd
-   unit (`samrajya-r3`), which outlives mahamantri's restart.
+   unit (`<service>-r3`), which outlives mahamantri's restart.
 4. `deploy` builds the commit from a `git archive` into `releases/<commit>`
    (go vet and test, plugin test and bundle), checks the config loads,
    refuses a plugin change without a new plugin version, then switches

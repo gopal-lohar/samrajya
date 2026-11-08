@@ -75,7 +75,7 @@ func TestStartRunsTheScriptOutsideTheServiceAndReadsItsReport(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := exec.LookPath("systemd-run"); err == nil {
-		if !strings.HasSuffix(argv[0], "systemd-run") || !slices.Contains(argv, "--unit=samrajya-r4") {
+		if !strings.HasSuffix(argv[0], "systemd-run") || !slices.Contains(argv, "--unit=svc-r4") {
 			t.Errorf("argv %v", argv)
 		}
 	}

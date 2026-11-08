@@ -139,7 +139,7 @@ func (u *selfUpdater) Start(a bridge.Approval) error {
 	argv := append([]string{u.script}, args...)
 	if u.systemd {
 		if run, err := exec.LookPath("systemd-run"); err == nil {
-			unit := "samrajya-" + strings.ToLower(a.ID)
+			unit := u.service + "-" + strings.ToLower(a.ID)
 			wrapped := []string{run, "--user", "--unit=" + unit, "--collect", "--quiet",
 				"--description=Samrajya " + a.ID + ": " + strings.Join(args, " ")}
 			for _, e := range append(env, "PATH="+os.Getenv("PATH"), "HOME="+os.Getenv("HOME")) {
