@@ -9,6 +9,8 @@
 #                           switch to it and restart; put the running release
 #                           back if Samrajya does not come up on it
 #   samrajya update         deploy the codebase's HEAD
+#   samrajya release REF    build and test a release without deploying it
+#   samrajya install-plugin install the running release's plugin for the sessions
 #   samrajya cutover        switch a setup from before surfaces to this version:
 #                           convert the config, install the plugin, stop the old
 #                           main session, start the new mahamantri. Backs up first.
@@ -200,8 +202,12 @@ wait_for_main() {
 # home is the service's working directory: the config, the releases and
 # (by default) the codebase live there.
 paths() {
-  unit
-  home=$(systemctl --user show -p WorkingDirectory --value "$service")
+  if [[ -n ${SAMRAJYA_HOME:-} ]]; then
+    home=$SAMRAJYA_HOME
+  else
+    unit
+    home=$(systemctl --user show -p WorkingDirectory --value "$service")
+  fi
   releases=$home/releases
   current=$home/current
   code=${SAMRAJYA_CODE:-$home/repos/samrajya}
@@ -310,6 +316,25 @@ cmd_restart_main_quiet() {
   [[ -n $id ]] && claude stop "$id" || true
 }
 
+# cmd_release builds a release of REF without deploying it, and prints
+# where (for setting a home up: SAMRAJYA_HOME=<home>).
+cmd_release() {
+  local ref=${1:-} sha
+  [[ -n $ref ]] || die "usage: samrajya release REF"
+  paths
+  sha=$(git -C "$code" rev-parse --verify --quiet "$ref^{commit}") || die "$ref is not a commit of $code"
+  [[ -x $releases/$sha/mahamantri/mahamantri ]] || build_release "$sha" "$releases/$sha"
+  echo "$releases/$sha"
+}
+
+# cmd_install_plugin installs the running release's plugin for the main
+# directory.
+cmd_install_plugin() {
+  paths
+  unit
+  install_plugin "$(realpath "$(main_dir)")" "$(readlink -f "$current")"
+}
+
 cmd_update() {
   paths
   cmd_deploy "$(git -C "$code" rev-parse HEAD)"
@@ -413,8 +438,10 @@ restart) cmd_restart ;;
 restart-main) shift; cmd_restart_main "$@" ;;
 build) cmd_build ;;
 deploy) shift; cmd_deploy "$@" ;;
+release) shift; cmd_release "$@" ;;
+install-plugin) cmd_install_plugin ;;
 update) cmd_update ;;
 cutover) cmd_cutover ;;
 rollback) cmd_rollback ;;
-*) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+*) sed -n '2,/^set -e/{/^set -e/d;p}' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
