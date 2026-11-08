@@ -297,9 +297,14 @@ cmd_deploy() {
     # A crash loop may have hit systemd's start limit.
     systemctl --user reset-failed "$service" 2>/dev/null || true
     systemctl --user restart "$service"
-    wait_for_bridge || true
-    [[ $replace_main == yes ]] && cmd_restart_main_quiet
-    result="Samrajya did not come up on ${sha:0:10} (see the log below), so the earlier release $(basename "$prev" | cut -c1-10) was put back"
+    local back="and the main session reattached"
+    if ! wait_for_bridge; then
+      back="but it is not answering either: check samrajya status"
+    else
+      [[ $replace_main == yes ]] && cmd_restart_main_quiet
+      wait_for_main || back="but the main session has not reattached yet"
+    fi
+    result="Samrajya did not come up on ${sha:0:10} (see the log below), so the earlier release $(basename "$prev" | cut -c1-10) was put back, $back"
     rm -f "$snapshot"
     exit 1
   fi
