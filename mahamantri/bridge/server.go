@@ -53,6 +53,10 @@ type Server struct {
 	// Supervisor stops agents for the main (samrajya_stop_agent) and says
 	// how long the queue for a free slot is. Nil when mahamantri launches
 	// no sessions (mode opencode).
+	// SelfUpdate carries out approved deploys and restarts of Samrajya
+	// itself (see approvals.go); nil: they cannot be asked for.
+	SelfUpdate SelfUpdater
+
 	Supervisor interface {
 		StopAgent(ctx context.Context, id string) error
 		Queued(agent string) (ahead int, queued bool)
@@ -115,6 +119,7 @@ func (s *Server) Receive(in Inbound) error {
 	s.Wake()
 	if created {
 		s.markReceived(in)
+		s.afterReceive(in)
 	}
 	return nil
 }
@@ -208,6 +213,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.turn(w, r)
 	case r.Method == http.MethodPost && path == "/v1/reply":
 		s.withAgent(w, r, s.reply)
+	case r.Method == http.MethodPost && path == "/v1/restart":
+		s.withAgent(w, r, s.askRestart)
+	case r.Method == http.MethodGet && path == "/v1/approvals":
+		as, err := s.Store.Approvals(r.URL.Query().Get("all") != "")
+		reply(w, nonNil(as), err)
 	case r.Method == http.MethodPost && path == "/v1/fetch":
 		s.withAgent(w, r, s.fetch)
 	case r.Method == http.MethodGet && path == "/v1/agents":
@@ -520,6 +530,7 @@ func (s *Server) Watch(ctx context.Context, every time.Duration) {
 		s.wakeAfterLimit()
 		set(ctx, s.currentStatus())
 		s.nudge(ctx)
+		s.followApprovals(ctx)
 		select {
 		case <-ctx.Done():
 			off, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -656,6 +667,9 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	names := s.surfaceNames()
 	sort.Strings(names)
 	out := map[string]any{"main": main, "you": me, "surfaces": names, "recovery": rec}
+	if as, err := s.Store.Approvals(false); err == nil && len(as) > 0 {
+		out["approvals"] = as
+	}
 	if s.Brain != nil {
 		out["brainIndex"] = s.Brain.Index()
 	}

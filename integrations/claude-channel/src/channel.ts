@@ -173,6 +173,27 @@ const tools = [
     },
   },
   {
+    name: 'samrajya_restart',
+    description:
+      'Ask the person to approve a change to the running Samrajya: deploy a commit of its codebase (kind deploy, with ref), ' +
+      'restart Samrajya (restart) or replace the main session (restart_main). The request is posted in the conversation; ' +
+      'mahamantri carries it out only once a trusted person answers "approve R<n>" there, builds and tests a deploy first, ' +
+      'puts the running release back if Samrajya does not come up, and tells you how it went. Never restart or redeploy Samrajya yourself.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: ['deploy', 'restart', 'restart_main'] },
+        ref: str('deploy: the commit or branch of the codebase, committed and tested'),
+        reason: str('What it changes and why, how you verified it - the person decides on this'),
+        conversation: str("Where to ask (default: your task's conversation; for the main, the home conversation)"),
+        thread_id: str('The thread to ask in'),
+        task_id: str('The task it belongs to'),
+      },
+      required: ['kind', 'reason'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'samrajya_message',
     description: 'Send text to another agent; it arrives on their Samrajya channel when their current step ends. A worker can message only the main.',
     inputSchema: { type: 'object', properties: { to: str('Agent id (default: main)'), body: str('The message') }, required: ['body'], additionalProperties: false },
@@ -196,7 +217,7 @@ const tools = [
 
 const workerTools = new Set(['samrajya_status', 'samrajya_accept', 'samrajya_update_task', 'samrajya_tasks', 'samrajya_reply',
   'samrajya_action_intent', 'samrajya_action_result', 'samrajya_memory', 'samrajya_remember', 'samrajya_forget', 'samrajya_report',
-  'samrajya_message', 'samrajya_fetch']);
+  'samrajya_message', 'samrajya_fetch', 'samrajya_restart']);
 
 /** The tools a session has: the main agent's, a worker's, or (no agent) status alone. */
 export function toolsFor(agent?: Agent) {
@@ -320,6 +341,8 @@ export function createChannel(opts: ChannelOptions) {
         });
       case 'samrajya_fetch':
         return bridge.request('POST', '/v1/fetch', { eventId: a.event_id, ref: a.ref });
+      case 'samrajya_restart':
+        return bridge.request('POST', '/v1/restart', { kind: a.kind, ref: a.ref, reason: a.reason, conversation: a.conversation, threadId: a.thread_id, taskId: a.task_id });
       case 'samrajya_message':
         return bridge.request('POST', '/v1/message', { to: a.to, body: a.body });
       case 'samrajya_stop_agent':

@@ -153,3 +153,18 @@ func TestSurfacesAreOptionalAndTelegramIsConfigured(t *testing.T) {
 		t.Errorf("telegram = %+v", c.Telegram)
 	}
 }
+
+func TestSelfUpdateNeedsTheCodebase(t *testing.T) {
+	path := writeConfig(t, claudeYAML+"selfUpdate:\n  code: ws/samrajya\n")
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "not a git repository") {
+		t.Errorf("no codebase: %v", err)
+	}
+	os.MkdirAll(filepath.Join(filepath.Dir(path), "ws", "samrajya", ".git"), 0o755)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.SelfUpdate.Code != filepath.Join(filepath.Dir(path), "ws", "samrajya") || c.SelfUpdate.Service != "samrajya-mahamantri" {
+		t.Errorf("selfUpdate %+v", c.SelfUpdate)
+	}
+}

@@ -170,7 +170,7 @@ test('the main session has the task, reply and agent tools', async (t) => {
   const names = (await client.listTools()).tools.map((x) => x.name);
   assert.deepEqual(names, ['samrajya_status', 'samrajya_accept', 'samrajya_create_task', 'samrajya_update_task',
     'samrajya_tasks', 'samrajya_reply', 'samrajya_action_intent', 'samrajya_action_result', 'samrajya_memory', 'samrajya_remember',
-    'samrajya_forget', 'samrajya_agents', 'samrajya_dispatch', 'samrajya_fetch', 'samrajya_message', 'samrajya_stop_agent']);
+    'samrajya_forget', 'samrajya_agents', 'samrajya_dispatch', 'samrajya_fetch', 'samrajya_restart', 'samrajya_message', 'samrajya_stop_agent']);
   assert.match(client.getInstructions() ?? '', /Samrajya's tools/);
   assert.equal(client.getServerCapabilities()?.experimental, undefined);
 });
@@ -196,6 +196,8 @@ test('tools send the attachment and map arguments; bridge errors come back as to
   assert.deepEqual(bridge.requests.find((r) => r.path === '/v1/dispatch')!.body, { brief: 'write the notes', conversation: 'telegram:7', route: false, links: ['ENG-1'] });
   await call('samrajya_fetch', { event_id: 'telegram:7:11', ref: 'f1' });
   assert.deepEqual(bridge.requests.find((r) => r.path === '/v1/fetch')!.body, { eventId: 'telegram:7:11', ref: 'f1' });
+  await call('samrajya_restart', { kind: 'deploy', ref: 'shorter-replies', reason: 'Shorter replies; tests pass' });
+  assert.deepEqual(bridge.requests.find((r) => r.path === '/v1/restart')!.body, { kind: 'deploy', ref: 'shorter-replies', reason: 'Shorter replies; tests pass' });
 });
 
 test('the attachment is kept alive by polling, and pushes nothing into the session', async (t) => {
@@ -247,7 +249,7 @@ test('an agent attaches with its id and secret, and has its role\'s tools', asyn
   const attach = bridge.requests.find((r) => r.path === '/v1/attach');
   assert.deepEqual({ ...attach?.body, client: undefined }, { client: undefined, agent: 'w-T3', secret: 's3', protocol: 3 });
   const names = (await client.listTools()).tools.map((x) => x.name);
-  assert.ok(names.includes('samrajya_report') && names.includes('samrajya_reply') && names.includes('samrajya_fetch'));
+  assert.ok(names.includes('samrajya_report') && names.includes('samrajya_reply') && names.includes('samrajya_fetch') && names.includes('samrajya_restart'));
   assert.ok(!names.includes('samrajya_dispatch') && !names.includes('samrajya_create_task'));
   const r = await client.callTool({ name: 'samrajya_dispatch', arguments: { brief: 'x' } });
   assert.equal(r.isError, true);
@@ -255,7 +257,7 @@ test('an agent attaches with its id and secret, and has its role\'s tools', asyn
 
 test('the main agent can dispatch and see the agents', () => {
   const main = toolsFor({ id: 'main', secret: 'x' }).map((x) => x.name);
-  for (const name of ['samrajya_dispatch', 'samrajya_agents', 'samrajya_message', 'samrajya_stop_agent', 'samrajya_fetch']) assert.ok(main.includes(name), name);
+  for (const name of ['samrajya_dispatch', 'samrajya_agents', 'samrajya_message', 'samrajya_stop_agent', 'samrajya_fetch', 'samrajya_restart']) assert.ok(main.includes(name), name);
   assert.ok(!main.includes('samrajya_report'));
 });
 

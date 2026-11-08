@@ -30,6 +30,7 @@ type claudeLauncher struct {
 	stateDir   string
 	mainRole   string
 	workerRole string
+	service    string // mahamantri's systemd service, which sessions may not touch
 	mainArgs   []string
 	workerArgs []string
 	remote     string // the main's Remote Control name; "" for none
@@ -41,6 +42,24 @@ type claudeLauncher struct {
 // Tools withheld from every agent: comments go through samrajya_reply,
 // which posts as Senapati whoever the connector belongs to.
 var withheldAll = []string{"mcp__claude_ai_Linear__save_comment", "mcp__claude_ai_Linear__delete_comment"}
+
+// selfDeny keeps sessions from restarting or redeploying Samrajya
+// themselves: that takes the person's approval, asked for with
+// samrajya_restart and carried out by mahamantri. It is a guard against
+// mistakes, not a sandbox - sessions run as the same user.
+func selfDeny(service string) []string {
+	if service == "" {
+		service = "samrajya-mahamantri"
+	}
+	var deny []string
+	for _, verb := range []string{"restart", "stop", "kill", "start", "reload", "disable", "mask", "edit", "revert"} {
+		deny = append(deny, "Bash(systemctl --user "+verb+" "+service+"*)", "Bash(systemctl --user "+verb+" samrajya-*)")
+	}
+	for _, cmd := range []string{"restart", "restart-main", "update", "deploy", "cutover", "rollback"} {
+		deny = append(deny, "Bash(*scripts/samrajya "+cmd+"*)", "Bash(samrajya "+cmd+"*)")
+	}
+	return append(deny, "Bash(claude stop*)", "Bash(*pkill*mahamantri*)", "Bash(*kill*mahamantri*)")
+}
 
 // Tools withheld from the main, so that long work can only be dispatched.
 var withheldMain = []string{"Edit", "Write", "NotebookEdit"}
@@ -59,7 +78,7 @@ func (l *claudeLauncher) Launch(ctx context.Context, a bridge.Agent, brief strin
 		"SAMRAJYA_AGENT":             a.ID,
 		"SAMRAJYA_AGENT_SECRET_FILE": secretFile,
 		"SAMRAJYA_BRIDGE_FILE":       l.discovery,
-	}})
+	}, "permissions": map[string]any{"deny": selfDeny(l.service)}})
 	role, extra, withheld := l.workerRole, l.workerArgs, withheldAll
 	if a.Role == bridge.RoleMain {
 		role, extra, withheld = l.mainRole, l.mainArgs, append(append([]string(nil), withheldAll...), withheldMain...)

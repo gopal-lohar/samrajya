@@ -164,6 +164,7 @@ func (s *Server) ReceiveBatch(ins []Inbound, metaKey, metaValue string) error {
 	for i, in := range ins {
 		if created[i] {
 			s.markReceived(in)
+			s.afterReceive(in)
 		}
 	}
 	return nil

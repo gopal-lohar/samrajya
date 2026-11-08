@@ -155,6 +155,22 @@ type Config struct {
 		// agents (default next to the discovery file).
 		StateDir string `yaml:"stateDir"`
 	} `yaml:"agents"`
+
+	// SelfUpdate lets Samrajya change itself: sessions work on its codebase
+	// like any project, and a trusted person can approve deploying a commit
+	// of it, or restarting Samrajya, from a conversation. See
+	// docs/design/self-update.md.
+	SelfUpdate struct {
+		// Code is Samrajya's own codebase, a git repository that deploys
+		// are built from. Empty: Samrajya cannot change itself.
+		Code string `yaml:"code"`
+		// Script carries deploys and restarts out (scripts/samrajya).
+		// Default: the one in the release mahamantri runs from.
+		Script string `yaml:"script"`
+		// Service is the systemd user service mahamantri runs as (default
+		// samrajya-mahamantri).
+		Service string `yaml:"service"`
+	} `yaml:"selfUpdate"`
 }
 
 func (c Config) LogFile() string { return filepath.Join(c.Dir, "mahamantri.log") }
@@ -249,7 +265,10 @@ func Load(path string) (Config, error) {
 	if c.Agents.StateDir == "" {
 		c.Agents.StateDir = filepath.Join(filepath.Dir(c.Bridge.DiscoveryFile), "agents")
 	}
-	paths := []*string{&c.Workspace, &c.Brain, &c.Bridge.Store, &c.Bridge.DiscoveryFile, &c.Bridge.MainDirectory, &c.Opencode.InstructionsFile,
+	if c.SelfUpdate.Code != "" && c.SelfUpdate.Service == "" {
+		c.SelfUpdate.Service = "samrajya-mahamantri"
+	}
+	paths := []*string{&c.SelfUpdate.Code, &c.SelfUpdate.Script, &c.Workspace, &c.Brain, &c.Bridge.Store, &c.Bridge.DiscoveryFile, &c.Bridge.MainDirectory, &c.Opencode.InstructionsFile,
 		&c.Agents.MainRole, &c.Agents.WorkerRole, &c.Agents.StateDir}
 	for _, p := range paths {
 		if *p != "" && !filepath.IsAbs(*p) {
@@ -336,6 +355,14 @@ func (c Config) Validate() error {
 		on := map[string]bool{"linear": c.LinearOn(), "telegram": c.TelegramOn()}
 		if id == "" || !on[surface] {
 			return fmt.Errorf("home %q must be a conversation on a configured surface, e.g. telegram:<chat id>", c.Home)
+		}
+	}
+	if c.SelfUpdate.Code != "" {
+		if st, err := os.Stat(filepath.Join(c.SelfUpdate.Code, ".git")); err != nil || !st.IsDir() {
+			return fmt.Errorf("selfUpdate.code %q is not a git repository: it must be Samrajya's codebase", c.SelfUpdate.Code)
+		}
+		if c.Mode != "claude" {
+			return fmt.Errorf("selfUpdate needs mode claude")
 		}
 	}
 	if !loopback(c.Bridge.ListenAddr) {

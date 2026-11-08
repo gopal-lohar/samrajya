@@ -137,9 +137,14 @@ func run(configPath string) error {
 				mainRole: cfg.Agents.MainRole, workerRole: cfg.Agents.WorkerRole,
 				mainArgs: cfg.Agents.MainArgs, workerArgs: cfg.Agents.WorkerArgs,
 				remote: cfg.Agents.RemoteControl, workerRC: cfg.Agents.WorkerRemote,
-				store: store, run: runIn,
+				store: store, run: runIn, service: cfg.SelfUpdate.Service,
 			}}
 		srv.Supervisor = sv
+	}
+	if cfg.SelfUpdate.Code != "" {
+		up := newSelfUpdater(cfg.SelfUpdate.Code, cfg.SelfUpdate.Script, cfg.SelfUpdate.Service, filepath.Join(cfg.Agents.StateDir, "approvals"))
+		srv.SelfUpdate = up
+		logger.Printf("self-update: codebase %s, release %s, script %s", cfg.SelfUpdate.Code, orUnknown(up.running), up.script)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -310,4 +315,11 @@ func withClaudeOnPath() {
 		}
 	}
 	os.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func orUnknown(s string) string {
+	if s == "" {
+		return "unknown (not a release)"
+	}
+	return s
 }

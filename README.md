@@ -18,7 +18,14 @@ chat is answered, and a request from anywhere becomes a piece of work.
   attaches the session as its agent, wakes it when messages arrive, and gives
   it its tools.
 - `senapati/`: the roles (`main.md`, `worker.md`; `senapati.md` for opencode).
-- `scripts/samrajya`: one command to run it (status, restart, update, cutover,
-  rollback).
+- `scripts/samrajya`: one command to run it (status, restart, deploy, update,
+  cutover, rollback).
 - `docs/design/`: how it works and why ([agents](docs/design/agents.md),
-  [surfaces](docs/design/surfaces.md)).
+  [surfaces](docs/design/surfaces.md),
+  [self-update](docs/design/self-update.md)).
+
+Samrajya can change itself. Its codebase is a project in its own workspace:
+ask it, on any surface, to change how it works, and a worker makes the
+change and tests it. Deploying it, or restarting Samrajya, waits for you to
+answer `approve R<n>` in that conversation; a deploy that does not come up
+is rolled back.

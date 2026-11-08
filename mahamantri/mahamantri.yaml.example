@@ -56,6 +56,15 @@ agents:
   # mainRole: ../senapati/main.md
   # workerRole: ../senapati/worker.md
 
+# Samrajya changing itself: sessions work on its codebase like any project,
+# and a trusted person approves deploying it ("approve R<n>" in the
+# conversation). Run from a release, not the checkout: see
+# ../docs/design/self-update.md.
+# selfUpdate:
+#   code: repos/samrajya             # the codebase (a git repository)
+#   service: samrajya-mahamantri     # the systemd user service
+#   # script: default: scripts/samrajya of the running release
+
 # mode: opencode only.
 opencode:
   serverURL: "http://localhost:4096"

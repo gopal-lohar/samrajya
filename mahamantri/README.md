@@ -100,6 +100,19 @@ secret in `<agents.stateDir>/main.secret` (see the plugin's README). In this
 mode the main does the work itself, so the parallelism guarantees above do not
 apply.
 
+## Changing itself
+
+With `selfUpdate.code` set, sessions may ask (`samrajya_restart`) to deploy a
+commit of Samrajya's codebase, restart Samrajya or replace the main session.
+The request is posted in the conversation, and only a trusted person's
+`approve R<n>` there starts it. mahamantri hands it to `scripts/samrajya` in
+a transient systemd unit, which builds and tests the release, switches to it,
+restarts, and puts the earlier release back if Samrajya does not come up.
+How it went is posted in the conversation. Sessions are denied the commands
+that would do it directly. See
+[`../docs/design/self-update.md`](../docs/design/self-update.md) for the
+layout this needs (the service runs from `releases/`, not a checkout).
+
 ## Run
 
 ```sh
@@ -114,7 +127,9 @@ Run it as a systemd user service, then use
 - `status`: the service, the sessions and what waits;
 - `restart`: sessions reattach by themselves;
 - `restart-main`: a new main session;
-- `update`: test, build, install the plugin and restart;
+- `deploy REF`: build and test a commit of the codebase as a release, switch
+  to it and restart, rolling back if it does not come up; `update` deploys
+  the codebase's HEAD;
 - `cutover` and `rollback`: switch a setup from before surfaces to this
   version, and undo it.
 

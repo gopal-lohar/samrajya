@@ -5,23 +5,54 @@
 #   samrajya restart        restart mahamantri; sessions reattach by themselves
 #   samrajya restart-main   stop the main session; mahamantri starts a new one
 #   samrajya build          test and build mahamantri (to mahamantri.next) and the plugin
-#   samrajya update         build, then put the new mahamantri in place and restart
+#   samrajya deploy REF     build and test a commit of the codebase as a release,
+#                           switch to it and restart; put the running release
+#                           back if Samrajya does not come up on it
+#   samrajya update         deploy the codebase's HEAD
 #   samrajya cutover        switch a setup from before surfaces to this version:
 #                           convert the config, install the plugin, stop the old
 #                           main session, start the new mahamantri. Backs up first.
 #   samrajya rollback       undo the last cutover, from its backup
 #
 # mahamantri runs as the systemd user service $SAMRAJYA_SERVICE (default
-# samrajya-mahamantri); its unit names the binary and the config.
+# samrajya-mahamantri); its unit names the binary and the config. Releases
+# live in releases/<commit> under the service's working directory, with
+# `current` pointing at the one that runs; the codebase is $SAMRAJYA_CODE
+# (default repos/samrajya there).
+#
+# With $SAMRAJYA_REPORT set (mahamantri sets it when it runs an approved
+# change), output goes to the report's .log and how it went is written to
+# the report as {"ok": ..., "text": ...}.
 set -euo pipefail
 
 root=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
 service=${SAMRAJYA_SERVICE:-samrajya-mahamantri}
 state=${XDG_STATE_HOME:-$HOME/.local/state}/samrajya
-export PATH="$HOME/.local/bin:$PATH"
+export PATH="$HOME/.local/bin:${PNPM_HOME:-$HOME/.local/share/pnpm}/bin:${PNPM_HOME:-$HOME/.local/share/pnpm}:/usr/local/go/bin:/usr/local/bin:$PATH"
 
 die() { echo "samrajya: $*" >&2; exit 1; }
 say() { echo "== $*"; }
+
+# result is what the report says when the command succeeds.
+result=""
+if [[ -n ${SAMRAJYA_REPORT:-} ]]; then
+  exec >>"${SAMRAJYA_REPORT%.json}.log" 2>&1
+  echo "== $(date -u +%FT%TZ) samrajya $*"
+  write_report() {
+    local code=$1 text
+    if [[ $code == 0 ]]; then
+      text=${result:-done}
+    else
+      text="${result:+$result
+
+}Last lines of ${SAMRAJYA_REPORT%.json}.log:
+$(tail -n 25 "${SAMRAJYA_REPORT%.json}.log")"
+    fi
+    jq -n --argjson ok "$([[ $code == 0 ]] && echo true || echo false)" --arg text "$text" '{ok: $ok, text: $text}' >"$SAMRAJYA_REPORT.tmp"
+    mv "$SAMRAJYA_REPORT.tmp" "$SAMRAJYA_REPORT"
+  }
+  trap 'write_report $?' EXIT
+fi
 
 # The binary, its directory and the config, from the service's unit.
 unit() {
@@ -72,6 +103,11 @@ cmd_restart() {
   systemctl --user restart "$service"
   sleep 3
   systemctl --user --no-pager status "$service" | sed -n '1,3p'
+  if [[ -n ${SAMRAJYA_REPORT:-} ]]; then
+    wait_for_bridge || { result="mahamantri did not come back after the restart"; exit 1; }
+    wait_for_main || { result="Samrajya restarted, but the main session has not reattached within 3 minutes"; exit 1; }
+    result="Samrajya restarted; the main session reattached."
+  fi
 }
 
 cmd_restart_main() {
@@ -80,8 +116,27 @@ cmd_restart_main() {
   dir=$(realpath "$(main_dir)")
   id=$(claude agents --json | jq -r --arg dir "$dir" '[.[] | select(.pid != null and .cwd == $dir and (.name | test("-main-g[0-9]+$")))][0].id // empty')
   [[ -n $id ]] || die "no main session is running; mahamantri starts one within a minute"
+  local gen
+  gen=$(bridge_status 2>/dev/null | jq -r '.main.generation // 0') || gen=0
   claude stop "$id"
   echo "stopped $id; mahamantri notices within two minutes and starts a new main session"
+  if [[ -n ${SAMRAJYA_REPORT:-} || ${1:-} == --wait ]]; then
+    wait_for_new_main "$gen" || { result="the main session was stopped, but no new one attached within 5 minutes"; exit 1; }
+    result="The main session was replaced; the new one attached."
+  fi
+}
+
+# wait_for_new_main waits for a main session attached after attachment gen.
+wait_for_new_main() {
+  local gen=$1 i st
+  for i in $(seq 1 60); do
+    if st=$(bridge_status 2>/dev/null) && jq -e --argjson g "$gen" '.main.live and .main.generation > $g' <<<"$st" >/dev/null; then
+      echo "a new main session attached"
+      return 0
+    fi
+    sleep 5
+  done
+  return 1
 }
 
 cmd_build() {
@@ -95,14 +150,14 @@ cmd_build() {
   "$(dirname "$bin")/mahamantri.next" check "$cfg" || echo "(the config needs converting: samrajya cutover)"
 }
 
-# install_plugin makes the main directory's sessions load the plugin in
-# this checkout. `claude plugin update --scope local` may update another
+# install_plugin makes the main directory's sessions load the plugin of
+# the release in $2 (default this checkout). `claude plugin update --scope local` may update another
 # directory's entry instead of this one, so it only fills the plugin cache;
 # the entries are then set by hand: this directory's to the new version,
 # every other one as it was.
 install_plugin() {
-  local dir=$1 want f=~/.claude/plugins/installed_plugins.json before
-  want=$(jq -r .version "$root/integrations/claude-channel/plugin/.claude-plugin/plugin.json")
+  local dir=$1 src=${2:-$root} want f=~/.claude/plugins/installed_plugins.json before
+  want=$(jq -r .version "$src/integrations/claude-channel/plugin/.claude-plugin/plugin.json")
   before=$(mktemp)
   cp "$f" "$before"
   claude plugin marketplace update samrajya >/dev/null
@@ -119,6 +174,17 @@ install_plugin() {
   echo "plugin $want installed for $dir"
 }
 
+wait_for_bridge() {
+  local i
+  for i in $(seq 1 30); do
+    if systemctl --user is-active --quiet "$service" && bridge_status >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
 wait_for_main() {
   local i
   for i in $(seq 1 36); do
@@ -131,17 +197,122 @@ wait_for_main() {
   return 1
 }
 
-cmd_update() {
-  cmd_build
+# home is the service's working directory: the config, the releases and
+# (by default) the codebase live there.
+paths() {
   unit
-  "$(dirname "$bin")/mahamantri.next" check "$cfg" >/dev/null || die "the config does not load with the new build: samrajya cutover converts it"
-  local dir
+  home=$(systemctl --user show -p WorkingDirectory --value "$service")
+  releases=$home/releases
+  current=$home/current
+  code=${SAMRAJYA_CODE:-$home/repos/samrajya}
+  [[ -d $code/.git ]] || code=$root
+  [[ -d $code/.git ]] || die "no codebase: set SAMRAJYA_CODE to Samrajya's git repository"
+}
+
+plugin_version() { jq -r .version "$1/integrations/claude-channel/plugin/.claude-plugin/plugin.json" 2>/dev/null || echo none; }
+
+# build_release builds and tests commit $1 of the codebase into $2.
+build_release() {
+  local sha=$1 out=$2 tmp
+  tmp=$(mktemp -d)
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp'" RETURN
+  mkdir -p "$tmp/src" "$tmp/rel/mahamantri" "$tmp/rel/integrations/claude-channel"
+  git -C "$code" archive --format=tar "$sha" | tar -x -C "$tmp/src"
+  say "testing mahamantri at ${sha:0:10}"
+  (cd "$tmp/src/mahamantri" && go vet ./... && go test ./... && go build -o "$tmp/rel/mahamantri/mahamantri" .)
+  say "testing and bundling the plugin"
+  (cd "$tmp/src/integrations/claude-channel" && pnpm install --frozen-lockfile --prefer-offline --reporter=silent && pnpm test >/dev/null && pnpm bundle >/dev/null)
+  cp -a "$tmp/src/integrations/.claude-plugin" "$tmp/rel/integrations/"
+  cp -a "$tmp/src/integrations/claude-channel/plugin" "$tmp/rel/integrations/claude-channel/"
+  cp -a "$tmp/src/senapati" "$tmp/src/scripts" "$tmp/rel/"
+  echo "$sha" >"$tmp/rel/RELEASE"
+  mkdir -p "$(dirname "$out")"
+  rm -rf "$out.partial"
+  mv "$tmp/rel" "$out.partial"
+  mv -T "$out.partial" "$out"
+}
+
+switch_to() { ln -sfn "$1" "$current.next" && mv -T "$current.next" "$current"; }
+
+cmd_deploy() {
+  local ref=${1:-} sha rel prev dir snapshot replace_main=no gen
+  [[ -n $ref ]] || die "usage: samrajya deploy REF"
+  paths
+  sha=$(git -C "$code" rev-parse --verify --quiet "$ref^{commit}") || die "$ref is not a commit of $code"
+  rel=$releases/$sha
+  prev=$(readlink -f "$current" 2>/dev/null || true)
+  [[ $prev != "$rel" ]] || die "${sha:0:10} is already the running release"
+  if [[ ! -x $rel/mahamantri/mahamantri ]]; then
+    build_release "$sha" "$rel" || { result="${sha:0:10} did not build or its tests failed; nothing was changed"; exit 1; }
+  fi
+  "$rel/mahamantri/mahamantri" check "$cfg" || { result="the config does not load with ${sha:0:10}; nothing was changed"; exit 1; }
+  if [[ -n $prev ]]; then
+    if ! diff -rq "$prev/integrations/claude-channel/plugin" "$rel/integrations/claude-channel/plugin" >/dev/null 2>&1; then
+      if [[ $(plugin_version "$prev") == "$(plugin_version "$rel")" ]]; then
+        result="the plugin changed but its version did not ($(plugin_version "$rel")): bump it in plugin.json, or sessions keep the old one. Nothing was changed"
+        exit 1
+      fi
+      replace_main=yes
+    fi
+    diff -rq "$prev/senapati" "$rel/senapati" >/dev/null 2>&1 || replace_main=yes
+  fi
   dir=$(realpath "$(main_dir)")
-  install_plugin "$dir"
-  cp -p "$bin" "$bin.prev"
-  mv "$(dirname "$bin")/mahamantri.next" "$bin"
-  cmd_restart
-  wait_for_main || echo "the main session has not attached yet: samrajya status"
+  snapshot=$(mktemp)
+  cp ~/.claude/plugins/installed_plugins.json "$snapshot"
+
+  say "switching to ${sha:0:10} (from ${prev:+$(basename "$prev" | cut -c1-10)})"
+  switch_to "$rel"
+  if [[ $(plugin_version "$prev") != "$(plugin_version "$rel")" ]]; then
+    install_plugin "$dir" "$rel"
+  fi
+  gen=$(bridge_status 2>/dev/null | jq -r '.main.generation // 0') || gen=0
+  systemctl --user restart "$service"
+  local ok=yes
+  if ! wait_for_bridge; then
+    ok=no
+  elif [[ $replace_main == yes ]]; then
+    say "the role or plugin changed: replacing the main session"
+    cmd_restart_main_quiet
+    wait_for_new_main 0 || ok=no
+  else
+    wait_for_main || ok=no
+  fi
+  if [[ $ok == no ]]; then
+    if [[ -z $prev ]]; then
+      result="Samrajya did not come up on ${sha:0:10}, and there is no earlier release to put back"
+      exit 1
+    fi
+    say "Samrajya did not come up on ${sha:0:10}: putting $(basename "$prev" | cut -c1-10) back"
+    journalctl --user -u "$service" -n 30 --no-pager || true
+    switch_to "$prev"
+    cp "$snapshot" ~/.claude/plugins/installed_plugins.json
+    systemctl --user restart "$service"
+    wait_for_bridge || true
+    [[ $replace_main == yes ]] && cmd_restart_main_quiet
+    result="Samrajya did not come up on ${sha:0:10} (see the log below), so the earlier release $(basename "$prev" | cut -c1-10) was put back"
+    rm -f "$snapshot"
+    exit 1
+  fi
+  rm -f "$snapshot"
+  # Keep the running release, the one before and the three newest others.
+  ls -1dt "$releases"/*/ 2>/dev/null | sed 's#/$##' | grep -vxF -e "$rel" -e "$prev" | tail -n +4 | xargs -r rm -rf
+  result="Deployed ${sha:0:10}: Samrajya is running on it$([[ $replace_main == yes ]] && echo ", with a new main session"). The release before, $(basename "${prev:-none}" | cut -c1-10), is kept: it can be deployed back the same way."
+  say "$result"
+}
+
+# cmd_restart_main_quiet stops the main session, if there is one, for
+# mahamantri to start a new one.
+cmd_restart_main_quiet() {
+  local d id
+  d=$(realpath "$(main_dir)")
+  id=$(claude agents --json | jq -r --arg dir "$d" '[.[] | select(.pid != null and .cwd == $dir and (.name | test("-main-g[0-9]+$")))][0].id // empty')
+  [[ -n $id ]] && claude stop "$id" || true
+}
+
+cmd_update() {
+  paths
+  cmd_deploy "$(git -C "$code" rev-parse HEAD)"
 }
 
 cmd_cutover() {
@@ -239,10 +410,11 @@ cmd_rollback() {
 case ${1:-} in
 status) cmd_status ;;
 restart) cmd_restart ;;
-restart-main) cmd_restart_main ;;
+restart-main) shift; cmd_restart_main "$@" ;;
 build) cmd_build ;;
+deploy) shift; cmd_deploy "$@" ;;
 update) cmd_update ;;
 cutover) cmd_cutover ;;
 rollback) cmd_rollback ;;
-*) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+*) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
