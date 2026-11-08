@@ -142,7 +142,7 @@ func run(configPath string) error {
 		srv.Supervisor = sv
 	}
 	if cfg.SelfUpdate.Code != "" {
-		up := newSelfUpdater(cfg.SelfUpdate.Code, cfg.SelfUpdate.Script, cfg.SelfUpdate.Service, filepath.Join(cfg.Agents.StateDir, "approvals"))
+		up := newSelfUpdater(cfg.SelfUpdate.Code, cfg.SelfUpdate.Script, cfg.SelfUpdate.Service, cfg.Bridge.DiscoveryFile, filepath.Join(cfg.Agents.StateDir, "approvals"))
 		srv.SelfUpdate = up
 		logger.Printf("self-update: codebase %s, release %s, script %s", cfg.SelfUpdate.Code, orUnknown(up.running), up.script)
 	}

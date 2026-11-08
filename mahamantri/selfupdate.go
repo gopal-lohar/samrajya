@@ -23,6 +23,7 @@ type selfUpdater struct {
 	code    string // the codebase
 	script  string // scripts/samrajya
 	service string // mahamantri's systemd user service
+	bridge  string // the bridge's discovery file, for the script
 	dir     string // where reports and logs go
 	// running is the release mahamantri runs (RELEASE next to it), if known.
 	running string
@@ -32,8 +33,8 @@ type selfUpdater struct {
 	start   func(argv []string, env []string, log string) error
 }
 
-func newSelfUpdater(code, script, service, dir string) *selfUpdater {
-	u := &selfUpdater{code: code, script: script, service: service, dir: dir, systemd: os.Getenv("INVOCATION_ID") != ""}
+func newSelfUpdater(code, script, service, bridgeFile, dir string) *selfUpdater {
+	u := &selfUpdater{code: code, script: script, service: service, bridge: bridgeFile, dir: dir, systemd: os.Getenv("INVOCATION_ID") != ""}
 	if script == "" {
 		u.script = filepath.Join(releaseRoot(), "scripts", "samrajya")
 	}
@@ -134,7 +135,7 @@ func (u *selfUpdater) Start(a bridge.Approval) error {
 		return fmt.Errorf("no script at %s", u.script)
 	}
 	os.Remove(u.report(a))
-	env := []string{"SAMRAJYA_REPORT=" + u.report(a), "SAMRAJYA_CODE=" + u.code, "SAMRAJYA_SERVICE=" + u.service}
+	env := []string{"SAMRAJYA_REPORT=" + u.report(a), "SAMRAJYA_CODE=" + u.code, "SAMRAJYA_SERVICE=" + u.service, "SAMRAJYA_BRIDGE_FILE=" + u.bridge}
 	argv := append([]string{u.script}, args...)
 	if u.systemd {
 		if run, err := exec.LookPath("systemd-run"); err == nil {

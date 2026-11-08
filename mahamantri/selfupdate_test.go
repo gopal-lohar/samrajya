@@ -40,7 +40,7 @@ func gitRepo(t *testing.T) (string, func(args ...string) string) {
 
 func TestDescribeSaysWhatADeployChanges(t *testing.T) {
 	dir, git := gitRepo(t)
-	u := newSelfUpdater(dir, "/x/samrajya", "svc", t.TempDir())
+	u := newSelfUpdater(dir, "/x/samrajya", "svc", "/b.json", t.TempDir())
 	u.running = git("rev-parse", "main")
 	ctx := context.Background()
 	sha, detail, err := u.Describe(ctx, bridge.Deploy, "shorter")
@@ -66,7 +66,7 @@ func TestStartRunsTheScriptOutsideTheServiceAndReadsItsReport(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "samrajya")
 	os.WriteFile(script, []byte("#!/bin/sh\n"), 0o755)
-	u := newSelfUpdater("/code", script, "svc", filepath.Join(dir, "approvals"))
+	u := newSelfUpdater("/code", script, "svc", "/b.json", filepath.Join(dir, "approvals"))
 	var argv, env []string
 	u.start = func(a, e []string, _ string) error { argv, env = a, e; return nil }
 	u.systemd = true
@@ -79,7 +79,8 @@ func TestStartRunsTheScriptOutsideTheServiceAndReadsItsReport(t *testing.T) {
 			t.Errorf("argv %v", argv)
 		}
 	}
-	if !slices.Equal(argv[len(argv)-3:], []string{script, "deploy", "abc"}) || !slices.Contains(env, "SAMRAJYA_REPORT="+filepath.Join(dir, "approvals", "R4.json")) {
+	if !slices.Equal(argv[len(argv)-3:], []string{script, "deploy", "abc"}) || !slices.Contains(env, "SAMRAJYA_REPORT="+filepath.Join(dir, "approvals", "R4.json")) ||
+		!slices.Contains(env, "SAMRAJYA_BRIDGE_FILE=/b.json") {
 		t.Errorf("argv %v env %v", argv, env)
 	}
 	if done, _, _ := u.Result(a); done {
