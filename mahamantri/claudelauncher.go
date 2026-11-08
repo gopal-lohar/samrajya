@@ -61,6 +61,10 @@ func selfDeny(service string) []string {
 	return append(deny, "Bash(claude stop*)", "Bash(*pkill*mahamantri*)", "Bash(*kill*mahamantri*)")
 }
 
+// pluginKey is the Samrajya plugin as Claude Code names it: plugin
+// samrajya from the marketplace samrajya.
+const pluginKey = "samrajya@samrajya"
+
 // Tools withheld from the main, so that long work can only be dispatched.
 var withheldMain = []string{"Edit", "Write", "NotebookEdit"}
 
@@ -78,7 +82,12 @@ func (l *claudeLauncher) Launch(ctx context.Context, a bridge.Agent, brief strin
 		"SAMRAJYA_AGENT":             a.ID,
 		"SAMRAJYA_AGENT_SECRET_FILE": secretFile,
 		"SAMRAJYA_BRIDGE_FILE":       l.discovery,
-	}, "permissions": map[string]any{"deny": selfDeny(l.service)}})
+	}, "permissions": map[string]any{"deny": selfDeny(l.service)},
+		// Enable the plugin here rather than rely on the directory's own
+		// settings, which belong to whichever project Claude Code takes the
+		// directory to be part of: a session without the plugin has no
+		// samrajya_* tools and cannot reply, report or stay attached.
+		"enabledPlugins": map[string]bool{pluginKey: true}})
 	role, extra, withheld := l.workerRole, l.workerArgs, withheldAll
 	if a.Role == bridge.RoleMain {
 		role, extra, withheld = l.mainRole, l.mainArgs, append(append([]string(nil), withheldAll...), withheldMain...)

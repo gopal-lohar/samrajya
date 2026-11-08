@@ -44,10 +44,16 @@ func TestClaudeLauncherStartsABackgroundSessionAsTheAgent(t *testing.T) {
 		slices.Contains(got, "--channels") || at("--model") != "sonnet" || got[len(got)-1] != "do T3" || got[len(got)-2] != "--" {
 		t.Errorf("argv %q", got)
 	}
-	var settings struct{ Env map[string]string }
+	var settings struct {
+		Env            map[string]string
+		EnabledPlugins map[string]bool
+	}
 	json.Unmarshal([]byte(at("--settings")), &settings)
 	if settings.Env["SAMRAJYA_AGENT"] != "w-T3" || settings.Env["SAMRAJYA_AGENT_SECRET_FILE"] != secret || settings.Env["SAMRAJYA_BRIDGE_FILE"] != "/state/bridge.json" {
 		t.Errorf("settings %v", settings)
+	}
+	if !settings.EnabledPlugins["samrajya@samrajya"] {
+		t.Errorf("the session does not enable the plugin: %v", settings.EnabledPlugins)
 	}
 	if slices.Contains(got, "Edit") || slices.Contains(got, "--remote-control") {
 		t.Errorf("worker argv %q", got)
