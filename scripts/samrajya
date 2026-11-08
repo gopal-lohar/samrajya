@@ -173,6 +173,14 @@ install_plugin() {
          + {version: $v, installPath: $path, lastUpdated: $now}])' "$f" >"$f.tmp"
   mv "$f.tmp" "$f"
   rm -f "$before"
+  # Enable it for the directory too, so a session started there by hand
+  # has it (mahamantri's own sessions enable it on their command line).
+  # Claude Code reads .claude/ settings only at the project root, which
+  # is this directory once it is no longer inside a git checkout.
+  local s=$dir/.claude/settings.local.json
+  mkdir -p "$dir/.claude"
+  [[ -f $s ]] || echo '{}' >"$s"
+  jq '.enabledPlugins["samrajya@samrajya"] = true' "$s" >"$s.tmp" && mv "$s.tmp" "$s"
   echo "plugin $want installed for $dir"
 }
 
@@ -310,7 +318,9 @@ cmd_deploy() {
   fi
   rm -f "$snapshot"
   # Keep the running release, the one before and the three newest others.
-  ls -1dt "$releases"/*/ 2>/dev/null | sed 's#/$##' | grep -vxF -e "$rel" -e "$prev" | tail -n +4 | xargs -r rm -rf
+  # grep finds nothing while there are only these two, which is fine:
+  # under pipefail it must not fail a deploy that went through.
+  ls -1dt "$releases"/*/ 2>/dev/null | sed 's#/$##' | { grep -vxF -e "$rel" -e "$prev" || true; } | tail -n +4 | xargs -r rm -rf
   result="Deployed ${sha:0:10}: Samrajya is running on it$([[ $replace_main == yes ]] && echo ", with a new main session"). The release before, $(basename "${prev:-none}" | cut -c1-10), is kept: it can be deployed back the same way."
   say "$result"
 }
