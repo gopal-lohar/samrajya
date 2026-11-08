@@ -213,7 +213,7 @@ func run(configPath string) error {
 	if len(surfaces) == 0 {
 		surfaces = append(surfaces, "none")
 	}
-	logger.Printf("mahamantri (%s): bridge on %s, surfaces: %s, store %s", cfg.Mode, base, strings.Join(surfaces, ", "), cfg.Bridge.Store)
+	logger.Printf("mahamantri (%s): release %s, bridge on %s, surfaces: %s, store %s", cfg.Mode, orUnknown(releaseCommit(releaseRoot())), base, strings.Join(surfaces, ", "), cfg.Bridge.Store)
 	fmt.Fprintf(os.Stderr, "mahamantri (%s): bridge %s, surfaces: %s\n"+
 		"  store %s - %d pending messages, %d open tasks, %d unresolved actions\n",
 		cfg.Mode, base, strings.Join(surfaces, ", "), cfg.Bridge.Store, len(rec.Pending), len(rec.Open), len(rec.Uncertain))

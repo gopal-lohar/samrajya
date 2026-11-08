@@ -38,9 +38,7 @@ func newSelfUpdater(code, script, service, bridgeFile, dir string) *selfUpdater 
 	if script == "" {
 		u.script = filepath.Join(releaseRoot(), "scripts", "samrajya")
 	}
-	if b, err := os.ReadFile(filepath.Join(releaseRoot(), "RELEASE")); err == nil {
-		u.running = strings.TrimSpace(string(b))
-	}
+	u.running = releaseCommit(releaseRoot())
 	u.run = func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		return exec.CommandContext(ctx, name, args...).CombinedOutput()
 	}
@@ -59,6 +57,17 @@ func releaseRoot() string {
 		exe = r
 	}
 	return filepath.Dir(filepath.Dir(exe))
+}
+
+// releaseCommit is the commit a release was built from, read from the
+// RELEASE file at its root; "" when there is none or it cannot be read, as
+// when mahamantri runs from a checkout.
+func releaseCommit(root string) string {
+	b, err := os.ReadFile(filepath.Join(root, "RELEASE"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
 }
 
 func (u *selfUpdater) git(ctx context.Context, args ...string) (string, error) {

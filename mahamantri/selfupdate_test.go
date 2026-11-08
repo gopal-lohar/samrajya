@@ -103,3 +103,33 @@ func TestSessionsMayNotRestartSamrajyaThemselves(t *testing.T) {
 		}
 	}
 }
+
+func TestReleaseCommit(t *testing.T) {
+	dir := t.TempDir()
+	if got := releaseCommit(dir); got != "" {
+		t.Fatalf("no RELEASE file: got %q, want empty", got)
+	}
+	if got := orUnknown(releaseCommit(dir)); got != "unknown (not a release)" {
+		t.Fatalf("no RELEASE file in the log: got %q", got)
+	}
+	sha := "0123456789abcdef0123456789abcdef01234567"
+	if err := os.WriteFile(filepath.Join(dir, "RELEASE"), []byte(sha+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := releaseCommit(dir); got != sha {
+		t.Fatalf("got %q, want %q", got, sha)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "RELEASE"), []byte("  \n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := orUnknown(releaseCommit(dir)); got != "unknown (not a release)" {
+		t.Fatalf("empty RELEASE file: got %q", got)
+	}
+	unreadable := filepath.Join(t.TempDir(), "RELEASE")
+	if err := os.Mkdir(unreadable, 0o755); err != nil { // a directory cannot be read as a file
+		t.Fatal(err)
+	}
+	if got := releaseCommit(filepath.Dir(unreadable)); got != "" {
+		t.Fatalf("unreadable RELEASE: got %q, want empty", got)
+	}
+}
