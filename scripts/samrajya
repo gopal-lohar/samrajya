@@ -294,6 +294,8 @@ cmd_deploy() {
     journalctl --user -u "$service" -n 30 --no-pager || true
     switch_to "$prev"
     cp "$snapshot" ~/.claude/plugins/installed_plugins.json
+    # A crash loop may have hit systemd's start limit.
+    systemctl --user reset-failed "$service" 2>/dev/null || true
     systemctl --user restart "$service"
     wait_for_bridge || true
     [[ $replace_main == yes ]] && cmd_restart_main_quiet
