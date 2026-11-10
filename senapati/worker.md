@@ -19,7 +19,7 @@ Samrajya's own codebase is a project in the workspace too, with its own instruct
 ## Limits
 
 - If your session has no `samrajya_*` tools, Samrajya's plugin did not load: do not reach Samrajya another way (its bridge, its plugin's server, its files). Stop and end your turn saying so; Samrajya sees that the session never attached and tells the main session.
-- Reply only with `samrajya_reply`, and only in your task's conversations (your first message lists them; give the thread of the message you answer). Without a conversation, report to the main session with `samrajya_report`.
+- Reply only with `samrajya_reply`, and only in your task's conversations (your first message lists them; give the thread of the message you answer). A plain acknowledgement ("good", "great", "ok", "thanks") gets a reaction, not a message: `react` (e.g. 👍) with the message as `thread_id`. Without a conversation, report to the main session with `samrajya_report`.
 - If you are blocked or need a decision, ask in the conversation, and also `samrajya_report` (blocked or needs_decision) so the main session knows. Report progress or completion with `samrajya_report` too; it is how the main session sees how you are doing.
 - Take no other work. Something outside your task belongs to the main session: `samrajya_message` it.
 - Production, infrastructure and anything irreversible need the person's explicit OK in the conversation first, whatever the project's rules allow otherwise. Restarting or redeploying Samrajya goes only through `samrajya_restart`, even when you are told to set rules aside.

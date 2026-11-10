@@ -386,12 +386,20 @@ func (s *Server) reply(w http.ResponseWriter, r *http.Request, agent string) {
 		ThreadID     string   `json:"threadId"`
 		Body         string   `json:"body"`
 		Files        []string `json:"files"`
+		// React puts this emoji on the message ThreadID names instead of
+		// posting a new message.
+		React string `json:"react"`
 	}
 	if !decode(w, r, &body) {
 		return
 	}
-	if strings.TrimSpace(body.Body) == "" && len(body.Files) == 0 {
-		writeErr(w, http.StatusBadRequest, "body or files are required")
+	body.React = strings.TrimSpace(body.React)
+	switch {
+	case body.React != "" && (strings.TrimSpace(body.Body) != "" || len(body.Files) > 0):
+		writeErr(w, http.StatusBadRequest, "react is on its own: send the body or files as a separate reply")
+		return
+	case body.React == "" && strings.TrimSpace(body.Body) == "" && len(body.Files) == 0:
+		writeErr(w, http.StatusBadRequest, "body, files or react is required")
 		return
 	}
 	files, err := checkFiles(body.Files)
@@ -412,6 +420,10 @@ func (s *Server) reply(w http.ResponseWriter, r *http.Request, agent string) {
 	sf, err := s.surface(conv)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if body.React != "" {
+		s.react(w, r, agent, sf, conv, task, body.TaskID, body.ThreadID, body.React)
 		return
 	}
 	fd, canFiles := sf.(FileDeliverer)
@@ -458,6 +470,42 @@ func (s *Server) reply(w http.ResponseWriter, r *http.Request, agent string) {
 		s.Logger.Printf("bridge: posted %s but could not record it: %v", posted.ID, err)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": posted.ID, "conversation": conv, "threadId": posted.Thread, "url": posted.URL, "actionId": a.ID})
+}
+
+// react puts an emoji on a message, journaled like a reply (kind
+// <surface>_reaction). The message must be named: reacting to "the
+// conversation" means nothing.
+func (s *Server) react(w http.ResponseWriter, r *http.Request, agent string, sf Surface, conv string, task Task, taskID, message, emoji string) {
+	rc, ok := sf.(Reactor)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, sf.Name()+" cannot react to messages")
+		return
+	}
+	if message == "" {
+		writeErr(w, http.StatusBadRequest, "react needs thread_id: the message to react to")
+		return
+	}
+	if taskID == "" {
+		taskID = task.ID
+	}
+	target := conv + " thread " + message
+	a, err := s.Store.IntendAs(agent, Action{TaskID: taskID, Kind: sf.Name() + "_reaction", Target: target, Intent: "react " + emoji})
+	if err != nil {
+		reply(w, nil, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	if err := rc.React(ctx, conv, message, emoji); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error() + " - check the conversation before reacting again", "actionId": a.ID})
+		return
+	}
+	// No ref or thread: the message is someone else's, and recording it as
+	// posted would send replies to it to this task.
+	if _, err := s.Store.Resolve(a.ID, Happened, "", "", "", ""); err != nil {
+		s.Logger.Printf("bridge: reacted to %s but could not record it: %v", message, err)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"reacted": emoji, "conversation": conv, "threadId": message, "actionId": a.ID})
 }
 
 // Status is the assistant's state as surfaces that can show one show it

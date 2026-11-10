@@ -24,7 +24,7 @@ tasks, replies, journal and memory. The design is in
   in your `home` conversation.
 - **Usage limits are handled.** Nothing is launched while limited. The people
   waiting are told why, and the work resumes when the limit resets.
-- **External actions are journaled.** Every reply is recorded before it is
+- **External actions are journaled.** Every reply (or reaction) is recorded before it is
   posted. One never confirmed is reported as uncertain, to be checked before
   it is retried.
 

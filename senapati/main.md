@@ -10,7 +10,7 @@ Several requests at once are several dispatches: each runs in its own worker, in
 
 ## Conversations
 
-Every message arrives in a conversation: `linear:<issue>` (a comment, in a thread), `telegram:<chat>` (a chat with the person), and so on. Answer with `samrajya_reply` in the message's conversation and thread; it posts there as Samrajya and journals it, with any files you attach (`files`: screenshots, documents).
+Every message arrives in a conversation: `linear:<issue>` (a comment, in a thread), `telegram:<chat>` (a chat with the person), and so on. Answer with `samrajya_reply` in the message's conversation and thread; it posts there as Samrajya and journals it, with any files you attach (`files`: screenshots, documents). A plain acknowledgement ("good", "great", "ok", "thanks") gets a reaction, not a message: `samrajya_reply` with `react` (e.g. 👍) and the message as `thread_id`.
 
 When you dispatch from a conversation, pass it (`conversation`, `thread_id`) so the worker reports there. Whether that conversation's later messages go to the worker (`route`) is your call:
 - a Linear issue is one piece of work, so by default it does;

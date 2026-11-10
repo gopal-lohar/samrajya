@@ -183,6 +183,20 @@ func TestReceivedReactsToTheMessage(t *testing.T) {
 	}
 }
 
+func TestReactSetsTheReaction(t *testing.T) {
+	api, bot, _ := setup(t)
+	if err := bot.React(context.Background(), "telegram:7", "110", "👍"); err != nil {
+		t.Fatal(err)
+	}
+	r := api.called("setMessageReaction")
+	if len(r) != 1 || !strings.Contains(r[0], `"chat_id":"7"`) || !strings.Contains(r[0], `"message_id":110`) || !strings.Contains(r[0], `"emoji":"👍"`) {
+		t.Errorf("reactions %v", r)
+	}
+	if bot.React(context.Background(), "linear:x", "110", "👍") == nil || bot.React(context.Background(), "telegram:7", "abc", "👍") == nil {
+		t.Error("reacted to something that is not a Telegram message")
+	}
+}
+
 func TestErrorsNeverCarryTheToken(t *testing.T) {
 	bot := &Bot{Token: "SECRET-TOKEN", URL: "http://127.0.0.1:1", Logger: log.New(io.Discard, "", 0)}
 	_, err := bot.Deliver(context.Background(), "telegram:7", "", "hi")

@@ -16,7 +16,8 @@ each worker) loads this plugin. It:
 - **gives it its tools.** All agents get:
   - `samrajya_accept`: accept a message into a task, or alone for a message
     answered on the spot;
-  - `samrajya_reply`: post in a conversation, on any surface, journaled;
+  - `samrajya_reply`: post in a conversation, on any surface, journaled,
+    or (`react`) put an emoji reaction on a message;
   - the task, journal and memory tools;
   - `samrajya_fetch`: save a file a message carried, to read it.
 

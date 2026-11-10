@@ -375,13 +375,26 @@ func (b *Bot) Received(ctx context.Context, e bridge.Event) error {
 	if b.ReceivedEmoji == "" || e.MessageRef() == "" {
 		return nil
 	}
-	chat, _ := strings.CutPrefix(e.Conversation, "telegram:")
-	id, err := strconv.ParseInt(e.MessageRef(), 10, 64)
-	if err != nil {
+	if _, err := strconv.ParseInt(e.MessageRef(), 10, 64); err != nil {
 		return nil
 	}
+	return b.React(ctx, e.Conversation, e.MessageRef(), b.ReceivedEmoji)
+}
+
+// React sets the bot's reaction on a message to emoji (replacing the one it
+// had, such as the received mark). Telegram takes only its own set of
+// reaction emoji and refuses others.
+func (b *Bot) React(ctx context.Context, conv, message, emoji string) error {
+	chat, ok := strings.CutPrefix(conv, "telegram:")
+	if !ok || chat == "" {
+		return fmt.Errorf("%q is not a Telegram conversation (telegram:<chat id>)", conv)
+	}
+	id, err := strconv.ParseInt(message, 10, 64)
+	if err != nil {
+		return fmt.Errorf("%q is not a Telegram message id", message)
+	}
 	return b.call(ctx, "setMessageReaction", map[string]any{
-		"chat_id": chat, "message_id": id, "reaction": []map[string]string{{"type": "emoji", "emoji": b.ReceivedEmoji}},
+		"chat_id": chat, "message_id": id, "reaction": []map[string]string{{"type": "emoji", "emoji": emoji}},
 	}, nil)
 }
 
