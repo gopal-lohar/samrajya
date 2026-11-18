@@ -138,7 +138,8 @@ func run(configPath string) error {
 				mainArgs: cfg.Agents.MainArgs, workerArgs: cfg.Agents.WorkerArgs,
 				remote: cfg.Agents.RemoteControl, workerRC: cfg.Agents.WorkerRemote,
 				store: store, run: runIn, service: cfg.SelfUpdate.Service,
-			}}
+			},
+			FreeMemory: availableMemory}
 		srv.Supervisor = sv
 	}
 	if cfg.SelfUpdate.Code != "" {

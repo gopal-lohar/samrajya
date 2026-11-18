@@ -36,6 +36,7 @@ type claudeLauncher struct {
 	remote     string // the main's Remote Control name; "" for none
 	workerRC   bool
 	store      *bridge.Store
+	daemonLog  string // Claude Code's daemon log; "" for the default
 	run        func(ctx context.Context, argv []string, dir string) ([]byte, error)
 }
 
