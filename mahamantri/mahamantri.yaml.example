@@ -47,7 +47,8 @@ bridge:
 
 # The sessions mode claude runs. See ../docs/design/agents.md.
 agents:
-  maxWorkers: 2              # workers running at once; the rest wait
+  maxWorkers: 6              # at most this many workers at once; the rest wait
+  minFreeMemMB: 2500         # start a worker only while more MB than this is available (-1: no floor)
   remoteControl: "Samrajya"  # the main session's Remote Control name
   workerRemoteControl: false # Remote Control for each worker too
   # mainArgs: ["--model", "sonnet"]

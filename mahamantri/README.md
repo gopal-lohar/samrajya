@@ -15,7 +15,8 @@ tasks, replies, journal and memory. The design is in
 - **Follow-ups go where the work is.** A conversation routed to a task goes to
   that task's worker. A reply to something a worker posted goes to that worker.
 - **Parallel work runs in parallel.** Each piece of work gets a worker session
-  of its own, up to `agents.maxWorkers` at once.
+  of its own, up to `agents.maxWorkers` at once and while the machine has
+  `agents.minFreeMemMB` of memory available.
 - **The main session stays reachable.** It has no Edit or Write, so it
   dispatches long work instead of doing it.
 - **Sessions are supervised.** Lost sessions are replaced, and failed launches

@@ -446,3 +446,106 @@ func TestAnIdleWorkerGivesUpItsSlotToQueuedWork(t *testing.T) {
 		t.Errorf("stopped the worker with work: %s", a.State)
 	}
 }
+
+func TestParseMemAvailable(t *testing.T) {
+	mb, err := parseMemAvailable("MemTotal:       24000000 kB\nMemFree:  100 kB\nMemAvailable:    3072000 kB\n")
+	if err != nil || mb != 3000 {
+		t.Errorf("got %d, %v", mb, err)
+	}
+	if _, err := parseMemAvailable("MemTotal: 1 kB\n"); err == nil {
+		t.Error("no MemAvailable: want an error")
+	}
+}
+
+// Workers start only while memory is above the floor, one per tick; below
+// it they wait, and the wait is logged once.
+func TestWorkersStartOnlyAboveTheMemoryFloor(t *testing.T) {
+	r := newRig(t)
+	var logs strings.Builder
+	free := 2000
+	r.sv.MaxWorkers, r.sv.MinFreeMemMB = 6, 2500
+	r.sv.FreeMemMB = func() (int, error) { return free, nil }
+	r.sv.Logger = log.New(&logs, "", 0)
+	w1, w2 := r.ping("ENG-1", "c1"), r.ping("ENG-2", "c2")
+	r.tick()
+	r.tick()
+	if got := r.l.launched(); len(got) != 1 || got[0] != "samrajya-main-g1" {
+		t.Fatalf("under the floor: launched %v", got)
+	}
+	if n := strings.Count(logs.String(), "under agents.minFreeMemMB"); n != 1 {
+		t.Errorf("logged the wait %d times: %s", n, logs.String())
+	}
+	if n, q := r.sv.Queued(w1); !q || n != 0 {
+		t.Errorf("w1 queued %d %v", n, q)
+	}
+	free = 4000
+	r.tick()
+	if got := r.l.launched(); len(got) != 2 || got[1] != "samrajya-"+w1+"-g1" {
+		t.Fatalf("above the floor, first tick: launched %v", got)
+	}
+	r.tick()
+	if got := r.l.launched(); len(got) != 3 || got[2] != "samrajya-"+w2+"-g1" {
+		t.Fatalf("above the floor, second tick: launched %v", got)
+	}
+	if !strings.Contains(logs.String(), "available again") {
+		t.Errorf("log %s", logs.String())
+	}
+}
+
+// A worker that finished but left its task working, and sits between turns
+// with no events, gives its slot to queued work after a while; its task is
+// paused, so it does not take the slot back.
+func TestAQuietWorkerWithAnOpenTaskGivesUpItsSlot(t *testing.T) {
+	r := newRig(t)
+	r.sv.MaxWorkers = 1
+	w1, w2 := r.ping("ENG-1", "c1"), r.ping("ENG-2", "c2")
+	r.tick()
+	r.attach(MainAgent)
+	c := r.attach(w1)
+	a := mustAgent(t, r, w1)
+	r.s.Store.AcceptAs(w1, []string{"linear:c1"}, a.TaskID, nil, "x")
+	r.s.Store.UpdateTaskAs(w1, a.TaskID, TaskUpdate{Status: Working})
+	c.do("POST", "/v1/turn", map[string]any{"agent": w1, "secret": a.Secret, "state": "end"})
+	r.advance(5 * time.Minute)
+	r.keepAlive()
+	r.tick()
+	if contains(r.l.launched(), "samrajya-"+w2+"-g1") {
+		t.Fatal("took the slot from a worker that may still be busy")
+	}
+	r.advance(6 * time.Minute)
+	r.keepAlive()
+	r.tick()
+	if !contains(r.l.launched(), "samrajya-"+w2+"-g1") || !contains(r.l.stops, "samrajya-"+w1+"-g1") {
+		t.Fatalf("launched %v, stopped %v", r.l.launched(), r.l.stops)
+	}
+	if tk, _ := r.s.Store.Task(a.TaskID); tk.Status != Paused {
+		t.Errorf("w1's task %s", tk.Status)
+	}
+	r.attach(w2)
+	r.advance(time.Minute)
+	r.keepAlive()
+	r.tick()
+	if contains(r.l.launched(), "samrajya-"+w1+"-g2") {
+		t.Error("w1 relaunched with nothing new")
+	}
+}
+
+// Freeing one slot launches one worker, not one per queued worker.
+func TestOneFreedSlotStartsOneWorker(t *testing.T) {
+	r := newRig(t)
+	r.sv.MaxWorkers = 1
+	w1 := r.ping("ENG-1", "c1")
+	w2, w3 := r.ping("ENG-2", "c2"), r.ping("ENG-3", "c3")
+	r.tick()
+	r.attach(MainAgent)
+	r.attach(w1)
+	r.s.Store.AcceptAs(w1, []string{"linear:c1"}, mustAgent(t, r, w1).TaskID, nil, "x")
+	r.s.Store.UpdateTaskAs(MainAgent, mustAgent(t, r, w1).TaskID, TaskUpdate{Status: Done, Result: "done"})
+	r.advance(2 * time.Minute)
+	r.keepAlive()
+	r.tick()
+	got := r.l.launched()
+	if !contains(got, "samrajya-"+w2+"-g1") || contains(got, "samrajya-"+w3+"-g1") {
+		t.Errorf("launched %v", got)
+	}
+}

@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -32,7 +34,8 @@ type Session struct {
 // (docs/design/agents.md): it launches an agent with work, adopts or stops
 // what runs unexpectedly, notices agents that went away, retries failed
 // launches with backoff and gives up after a few, stops idle workers,
-// reports stuck turns, keeps at most MaxWorkers running, and launches
+// reports stuck turns, keeps at most MaxWorkers running, starts a worker
+// only while the machine has MinFreeMemMB of memory available, and launches
 // nothing while the account is at its usage limit.
 type Supervisor struct {
 	Store    *Store
@@ -43,6 +46,11 @@ type Supervisor struct {
 	// it may stop as strays.
 	Prefix     string
 	MaxWorkers int
+	// MinFreeMemMB: a worker is launched only while the memory available
+	// (MemAvailable in /proc/meminfo) is above this many MB. 0: no floor.
+	MinFreeMemMB int
+	// FreeMemMB reads the memory available, in MB (default: /proc/meminfo).
+	FreeMemMB func() (int, error)
 
 	StartTimeout time.Duration // a launch must attach within this
 	IdleAfter    time.Duration // a worker with no work and no turn this long is stopped
@@ -58,6 +66,8 @@ type Supervisor struct {
 
 	now     func() time.Time
 	started time.Time
+	memLow  bool // the last launch waited for memory; logged once per change
+	memErr  bool // reading memory failed; logged once
 }
 
 func (sv *Supervisor) defaults() {
@@ -71,7 +81,10 @@ func (sv *Supervisor) defaults() {
 		sv.Prefix = "samrajya"
 	}
 	if sv.MaxWorkers <= 0 {
-		sv.MaxWorkers = 2
+		sv.MaxWorkers = 6
+	}
+	if sv.FreeMemMB == nil {
+		sv.FreeMemMB = memAvailableMB
 	}
 	if sv.StartTimeout == 0 {
 		sv.StartTimeout = 5 * time.Minute
@@ -377,8 +390,10 @@ func (sv *Supervisor) resumeAfterLimit() {
 }
 
 // launch starts agents that have work and are not running: the main first,
-// then workers in the order their work arrived, up to MaxWorkers; one per
-// tick just after a usage limit ends.
+// then workers in the order their work arrived, up to MaxWorkers and while
+// memory is above MinFreeMemMB; one per tick just after a usage limit
+// ends, and one worker per tick with a memory floor, so that each reading
+// includes the worker launched before.
 func (sv *Supervisor) launch(ctx context.Context) {
 	if !sv.Server.limitedUntil().IsZero() {
 		return
@@ -411,41 +426,129 @@ func (sv *Supervisor) launch(ctx context.Context) {
 		return first(want[i]).Before(first(want[j]))
 	})
 	_, slow := sv.recentlyLimited()
+	waiting := 0
 	for _, a := range want {
 		if a.Role == RoleWorker {
-			if active >= sv.MaxWorkers && !sv.freeSlot(ctx, agents) {
+			waiting++
+		}
+	}
+	for _, a := range want {
+		if a.Role == RoleWorker {
+			if !sv.enoughMemory(waiting) {
+				// A worker with nothing to do gives its memory back; the
+				// next tick reads it again.
+				sv.freeSlot(ctx)
+				return
+			}
+			if active >= sv.MaxWorkers && !sv.freeSlot(ctx) {
 				return
 			}
 			active++
+			waiting--
 		}
 		sv.start(ctx, a)
-		if slow {
+		if slow || (a.Role == RoleWorker && sv.MinFreeMemMB > 0) {
 			return
 		}
 	}
+}
+
+// enoughMemory reports whether the memory available is above MinFreeMemMB,
+// logging when that changes. A machine whose memory cannot be read is not
+// held back.
+func (sv *Supervisor) enoughMemory(waiting int) bool {
+	if sv.MinFreeMemMB <= 0 {
+		return true
+	}
+	free, err := sv.FreeMemMB()
+	if err != nil {
+		if !sv.memErr {
+			sv.memErr = true
+			sv.Logger.Printf("supervisor: cannot read available memory, launching without a floor: %v", err)
+		}
+		return true
+	}
+	low := free < sv.MinFreeMemMB
+	if low != sv.memLow {
+		sv.memLow = low
+		if low {
+			sv.Logger.Printf("supervisor: %d MB of memory available, under agents.minFreeMemMB (%d MB): %d queued worker(s) wait until it rises", free, sv.MinFreeMemMB, waiting)
+		} else {
+			sv.Logger.Printf("supervisor: %d MB of memory available again: launching queued workers", free)
+		}
+	}
+	return !low
+}
+
+// memAvailableMB reads MemAvailable from /proc/meminfo.
+func memAvailableMB() (int, error) {
+	b, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0, err
+	}
+	return parseMemAvailable(string(b))
+}
+
+func parseMemAvailable(meminfo string) (int, error) {
+	for _, l := range strings.Split(meminfo, "\n") {
+		f := strings.Fields(l)
+		if len(f) >= 2 && f[0] == "MemAvailable:" {
+			kb, err := strconv.Atoi(f[1])
+			if err != nil {
+				return 0, fmt.Errorf("meminfo: %q: %v", l, err)
+			}
+			return kb / 1024, nil
+		}
+	}
+	return 0, fmt.Errorf("meminfo: no MemAvailable")
 }
 
 // slotGrace is how long a worker with nothing to do keeps its slot when
 // other work is waiting for one: long enough to answer a quick follow-up.
 const slotGrace = time.Minute
 
+// parkAfter is how long a worker whose task is still queued or working, but
+// which has no turn and no events, keeps its slot when other work waits
+// for one. Such a worker has finished or waits on a person, and its
+// session does nothing until an event arrives.
+const parkAfter = 10 * time.Minute
+
 // freeSlot stops one running worker that has nothing to do, so that queued
-// work can start now rather than when it would be stopped for idling. It
-// reports whether it freed a slot.
-func (sv *Supervisor) freeSlot(ctx context.Context, agents []Agent) bool {
+// work can start now rather than when it would be stopped for idling. A
+// worker whose task is still open but which has sat between turns with no
+// events for parkAfter counts too: its task is paused, so it starts again
+// on its next event rather than taking the slot back at once. It reports
+// whether it freed a slot.
+func (sv *Supervisor) freeSlot(ctx context.Context) bool {
+	agents, err := sv.Store.Agents() // fresh: a slot freed earlier this tick is gone
+	if err != nil {
+		return false
+	}
 	for _, a := range agents {
-		if a.Role != RoleWorker || a.State != AgentLive || a.InTurn || sv.hasWork(a) {
+		if a.Role != RoleWorker || a.State != AgentLive || a.InTurn {
+			continue
+		}
+		if p, _ := sv.Store.PendingFor(a.ID, 0); len(p) > 0 {
 			continue
 		}
 		last := a.LaunchedAt
 		if a.TurnAt.After(last) {
 			last = a.TurnAt
 		}
-		if sv.now().Sub(last) < slotGrace {
+		park := sv.hasWork(a)
+		if wait := map[bool]time.Duration{false: slotGrace, true: parkAfter}[park]; sv.now().Sub(last) < wait {
 			continue
 		}
-		sv.Logger.Printf("supervisor: stopping %s, which has nothing to do, to free a slot", a.ID)
+		if park {
+			sv.Logger.Printf("supervisor: stopping %s, between turns for %s with task %s still open, to free a slot; its task is paused until its next event",
+				a.ID, sv.now().Sub(last).Round(time.Minute), a.TaskID)
+		} else {
+			sv.Logger.Printf("supervisor: stopping %s, which has nothing to do, to free a slot", a.ID)
+		}
 		sv.retire(ctx, a, sv.runningByName(ctx), "")
+		if park {
+			sv.Store.UpdateTaskAs(MainAgent, a.TaskID, TaskUpdate{Status: Paused})
+		}
 		return true
 	}
 	return false

@@ -130,8 +130,16 @@ are journaled once, and agents are supervised on a server.
     and the Linear thread, and the next worker starts from those.
   - *Stuck*: a turn running for over 90 minutes is reported to the main and
     shown in `samrajya_agents`; nothing is killed automatically.
-  - *Cap*: at most `maxWorkers` (default 2) run at once; the rest wait in
-    order, and their authors are told they are queued and behind how many.
+  - *Cap*: a worker starts only while the machine has more than
+    `minFreeMemMB` (default 2500) of memory available, one per tick so each
+    reading counts the last launch, and at most `maxWorkers` (default 6)
+    run at once; the rest wait in order, and their authors are told they
+    are queued and behind how many.
+  - *Freeing a slot*: while work waits, a worker with nothing to do is
+    stopped a minute after its last turn. One whose task is still `queued`
+    or `working` but which has had no turn and no event for 10 minutes has
+    finished or waits on a person: it is stopped too and its task paused,
+    so it starts again on its next event.
   - *Main*: kept running, as `keepMain` does today.
 - **Identity**: the launcher gives each session its agent id and the path of
   a secret file (0600) through `--settings` env, which reaches the plugin
@@ -215,7 +223,7 @@ In Go, with a fake launcher and clock:
    one launch; so do a ping and a dispatch.
 4. An issue's identifier changing keeps routing to the same task.
 5. An untrusted ping on a new issue starts nothing and goes to the main.
-6. With `maxWorkers: 2`, a third issue waits and starts when one frees.
+6. With `maxWorkers: 2` (or memory under `minFreeMemMB`), a third issue waits and starts when one frees.
 7. A replaced worker's old generation is refused and stopped before the new
    launch.
 8. Mahamantri dying between recording `starting` and the launch returning:

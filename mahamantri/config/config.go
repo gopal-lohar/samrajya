@@ -133,8 +133,13 @@ type Config struct {
 	// person and a worker per piece of work, launched and supervised by
 	// mahamantri. See docs/design/agents.md.
 	Agents struct {
-		Enabled    *bool `yaml:"enabled"` // replaced; kept to say so
-		MaxWorkers int   `yaml:"maxWorkers"`
+		Enabled *bool `yaml:"enabled"` // replaced; kept to say so
+		// MaxWorkers caps the workers running at once (default 6).
+		MaxWorkers int `yaml:"maxWorkers"`
+		// MinFreeMemMB: a queued worker starts only while the machine has
+		// more than this many MB available (MemAvailable); otherwise it
+		// waits. Default 2500; -1: no floor.
+		MinFreeMemMB int `yaml:"minFreeMemMB"`
 		// NamePrefix starts every session name mahamantri launches; sessions
 		// with the prefix that are no agent's current launch are stopped.
 		NamePrefix string `yaml:"namePrefix"`
@@ -248,7 +253,10 @@ func Load(path string) (Config, error) {
 		c.Opencode.InstructionsFile = "../senapati/senapati.md"
 	}
 	if c.Agents.MaxWorkers == 0 {
-		c.Agents.MaxWorkers = 2
+		c.Agents.MaxWorkers = 6
+	}
+	if c.Agents.MinFreeMemMB == 0 {
+		c.Agents.MinFreeMemMB = 2500
 	}
 	if c.Agents.NamePrefix == "" {
 		c.Agents.NamePrefix = "samrajya"

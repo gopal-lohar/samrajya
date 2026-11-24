@@ -61,7 +61,7 @@ func TestClaudeIsTheDefaultModeAndNeedsNoOpencode(t *testing.T) {
 		t.Errorf("discovery file = %q", c.Bridge.DiscoveryFile)
 	}
 	if c.Bridge.MainDirectory != filepath.Join(dir, "ws") || len(c.Linear.TrustedUserIDs) != 1 || c.Linear.BotName != "Senapati" ||
-		!*c.Linear.StartsWork || c.TelegramOn() || c.Agents.MaxWorkers != 2 {
+		!*c.Linear.StartsWork || c.TelegramOn() || c.Agents.MaxWorkers != 6 || c.Agents.MinFreeMemMB != 2500 {
 		t.Errorf("config = %+v", c)
 	}
 }

@@ -131,6 +131,7 @@ func run(configPath string) error {
 	var sv *bridge.Supervisor
 	if workers {
 		sv = &bridge.Supervisor{Store: store, Server: srv, Logger: logger, Prefix: cfg.Agents.NamePrefix, MaxWorkers: cfg.Agents.MaxWorkers,
+			MinFreeMemMB: max(cfg.Agents.MinFreeMemMB, 0),
 			Launcher: &claudeLauncher{
 				command: cfg.Agents.Command, dir: cfg.Bridge.MainDirectory, discovery: cfg.Bridge.DiscoveryFile,
 				stateDir: cfg.Agents.StateDir,
@@ -218,7 +219,7 @@ func run(configPath string) error {
 		"  store %s - %d pending messages, %d open tasks, %d unresolved actions\n",
 		cfg.Mode, base, strings.Join(surfaces, ", "), cfg.Bridge.Store, len(rec.Pending), len(rec.Open), len(rec.Uncertain))
 	if sv != nil {
-		fmt.Fprintf(os.Stderr, "  agents: a main and up to %d workers, sessions named %s-*\n", cfg.Agents.MaxWorkers, cfg.Agents.NamePrefix)
+		fmt.Fprintf(os.Stderr, "  agents: a main and up to %d workers while over %d MB of memory is free, sessions named %s-*\n", cfg.Agents.MaxWorkers, max(cfg.Agents.MinFreeMemMB, 0), cfg.Agents.NamePrefix)
 	}
 	if oc != nil {
 		fmt.Fprintf(os.Stderr, "  main session: opencode session %s\n", oc.session)
