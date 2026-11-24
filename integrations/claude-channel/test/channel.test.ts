@@ -192,6 +192,8 @@ test('tools send the attachment and map arguments; bridge errors come back as to
   assert.deepEqual(put.body, { description: 'Deploy rule', body: 'Ask first.' });
   await call('samrajya_reply', { conversation: 'telegram:7', thread_id: '11', body: 'On it' });
   assert.deepEqual(bridge.requests.find((r) => r.path === '/v1/reply')!.body, { conversation: 'telegram:7', threadId: '11', body: 'On it' });
+  await call('samrajya_reply', { conversation: 'telegram:7', thread_id: '12', react: '👍' });
+  assert.deepEqual(bridge.requests.filter((r) => r.path === '/v1/reply')[1]!.body, { conversation: 'telegram:7', threadId: '12', react: '👍' });
   await call('samrajya_dispatch', { brief: 'write the notes', conversation: 'telegram:7', route: false, links: ['ENG-1'] });
   assert.deepEqual(bridge.requests.find((r) => r.path === '/v1/dispatch')!.body, { brief: 'write the notes', conversation: 'telegram:7', route: false, links: ['ENG-1'] });
   await call('samrajya_fetch', { event_id: 'telegram:7:11', ref: 'f1' });

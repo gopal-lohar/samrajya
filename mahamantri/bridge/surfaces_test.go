@@ -19,6 +19,7 @@ type fakeChat struct {
 	mu   sync.Mutex
 	sent []string // "chat replyTo body"
 	seen []string
+	reac []string // "chat message emoji"
 	n    int
 	fail bool
 }
@@ -35,6 +36,22 @@ func (f *fakeChat) Deliver(_ context.Context, conv, thread, body string) (Posted
 	f.sent = append(f.sent, strings.TrimPrefix(conv, "chat:")+" "+thread+" "+body)
 	id := fmt.Sprintf("m%d", 100+f.n)
 	return Posted{ID: id, Thread: id}, nil
+}
+
+func (f *fakeChat) React(_ context.Context, conv, message, emoji string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.fail {
+		return errors.New("down")
+	}
+	f.reac = append(f.reac, strings.TrimPrefix(conv, "chat:")+" "+message+" "+emoji)
+	return nil
+}
+
+func (f *fakeChat) reactions() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.reac...)
 }
 
 func (f *fakeChat) Received(_ context.Context, e Event) error {
@@ -127,6 +144,17 @@ func TestAChatStaysWithTheMainWhileItsWorkersReportThere(t *testing.T) {
 	}
 	if got := chat.got(); len(got) != 1 || got[0] != "1 1 On it: drafting now." {
 		t.Errorf("sent %v", got)
+	}
+	// A worker's reaction to the person's message does not make that
+	// message the worker's: a reply to it still goes to the main.
+	if code, out := wc.do("POST", "/v1/reply", map[string]any{"conversation": "chat:1", "threadId": "2", "react": "👍"}); code != http.StatusOK {
+		t.Fatalf("worker reaction: %d %v", code, out)
+	}
+	toTheirs := chatMsg("4", "and the weather tomorrow?")
+	toTheirs.InReplyTo = "2"
+	r.s.Receive(toTheirs)
+	if o := ownerOf(t, r.s.Store, "chat:1:4"); o != MainAgent {
+		t.Errorf("a reply to a message the worker reacted to went to %s", o)
 	}
 }
 
@@ -308,5 +336,45 @@ func TestARepliesFilesAreCheckedAndSent(t *testing.T) {
 	}
 	if code, _ := main.do("POST", "/v1/reply", map[string]any{"conversation": "linear:x", "body": "x", "files": []string{shot}}); code != http.StatusBadRequest {
 		t.Errorf("files to a surface that cannot take them: %d", code)
+	}
+}
+
+// A reply can be a reaction instead of a message: it goes on the message
+// thread_id names, journaled, and counts as said for the task. It needs a
+// message, stands alone, and only on a surface that has reactions.
+func TestAReplyCanBeAReaction(t *testing.T) {
+	r, chat := chatRig(t)
+	r.tick()
+	main := r.attach(MainAgent)
+	for name, req := range map[string]map[string]any{
+		"no message":        {"conversation": "chat:1", "react": "👍"},
+		"with a body":       {"conversation": "chat:1", "threadId": "1", "react": "👍", "body": "good"},
+		"nothing at all":    {"conversation": "chat:1", "threadId": "1"},
+		"no reactions here": {"conversation": "linear:x", "threadId": "c1", "react": "👍"},
+	} {
+		if code, _ := main.do("POST", "/v1/reply", req); code != http.StatusBadRequest {
+			t.Errorf("%s: %d", name, code)
+		}
+	}
+	code, out := main.do("POST", "/v1/reply", map[string]any{"conversation": "chat:1", "threadId": "5", "react": "👍"})
+	if code != http.StatusOK || out["reacted"] != "👍" {
+		t.Fatalf("react: %d %v", code, out)
+	}
+	if got := chat.reactions(); len(got) != 1 || got[0] != "1 5 👍" {
+		t.Errorf("reactions %q", got)
+	}
+	if got := chat.got(); len(got) != 0 {
+		t.Errorf("a reaction also sent a message: %q", got)
+	}
+	said, _ := r.s.Store.Said(Task{ThreadID: "5", Conversations: []string{"chat:1"}}, 5)
+	if len(said) != 1 {
+		t.Fatalf("said %+v", said)
+	}
+	if a := said[0]; a.ID != out["actionId"] || a.Kind != "chat_reaction" || a.Status != Happened || a.Intent != "react 👍" {
+		t.Errorf("journaled %+v", a)
+	}
+	chat.fail = true
+	if code, out := main.do("POST", "/v1/reply", map[string]any{"conversation": "chat:1", "threadId": "6", "react": "👍"}); code != http.StatusBadGateway || out["actionId"] == nil {
+		t.Errorf("failed reaction: %d %v", code, out)
 	}
 }

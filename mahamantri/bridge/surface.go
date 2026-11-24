@@ -204,6 +204,12 @@ type FileDeliverer interface {
 	DeliverFiles(ctx context.Context, conv, thread, body string, files []File) (Posted, error)
 }
 
+// Reactor is a surface that can put an emoji reaction on a message (a chat
+// message, a Linear comment): a plain acknowledgement without a new message.
+type Reactor interface {
+	React(ctx context.Context, conv, message, emoji string) error
+}
+
 // Limits on a reply's files: what the surfaces accept.
 const (
 	maxReplyFiles = 10

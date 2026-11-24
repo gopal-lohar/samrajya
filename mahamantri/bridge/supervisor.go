@@ -25,6 +25,12 @@ type Launcher interface {
 	Running(ctx context.Context) ([]Session, error)
 }
 
+// GoneExplainer is a Launcher that can say why its runtime ended a session
+// ("" when it cannot tell), so a lost session is logged with its cause.
+type GoneExplainer interface {
+	WhyGone(s Session) string
+}
+
 // Session is a runtime session.
 type Session struct {
 	ID, Name string
@@ -64,10 +70,19 @@ type Supervisor struct {
 	MainBacklogAfter time.Duration
 	MaxFailures      int // launches that fail in a row before giving up
 
-	now     func() time.Time
-	started time.Time
-	memLow  bool // the last launch waited for memory; logged once per change
-	memErr  bool // reading memory failed; logged once
+	// FreeMemory reports the host's available memory in bytes (false when
+	// it cannot tell). Below LowMemory the person is told, at most once
+	// per LowMemoryEvery: Claude Code closes idle background sessions,
+	// Samrajya's own included, when the host runs short of memory.
+	FreeMemory     func() (uint64, bool)
+	LowMemory      uint64
+	LowMemoryEvery time.Duration
+
+	now         func() time.Time
+	started     time.Time
+	memLow      bool // the last launch waited for memory; logged once per change
+	memErr      bool // reading memory failed; logged once
+	memWarnedAt time.Time
 }
 
 func (sv *Supervisor) defaults() {
@@ -103,6 +118,12 @@ func (sv *Supervisor) defaults() {
 	}
 	if sv.MaxFailures == 0 {
 		sv.MaxFailures = 3
+	}
+	if sv.LowMemory == 0 {
+		sv.LowMemory = 1536 << 20
+	}
+	if sv.LowMemoryEvery == 0 {
+		sv.LowMemoryEvery = 6 * time.Hour
 	}
 }
 
@@ -142,12 +163,32 @@ func (sv *Supervisor) Tick(ctx context.Context) {
 	for _, r := range running {
 		byName[r.Name] = r
 	}
+	sv.watchMemory(ctx)
 	sv.stopStrays(ctx, agents, running)
 	for _, a := range agents {
 		sv.check(ctx, a, byName)
 	}
 	sv.resumeAfterLimit()
 	sv.launch(ctx)
+}
+
+// watchMemory tells the person when the host is short of memory, before
+// Claude Code starts closing idle sessions to make room.
+func (sv *Supervisor) watchMemory(ctx context.Context) {
+	if sv.FreeMemory == nil {
+		return
+	}
+	free, ok := sv.FreeMemory()
+	if !ok || free >= sv.LowMemory {
+		return
+	}
+	now := sv.now()
+	if !sv.memWarnedAt.IsZero() && now.Sub(sv.memWarnedAt) < sv.LowMemoryEvery {
+		return
+	}
+	sv.memWarnedAt = now
+	sv.Server.TellPerson(ctx, fmt.Sprintf("The host has only %d MB of memory available. Below about 1 GB, Claude Code closes idle sessions, "+
+		"Samrajya's main and workers included. Free some: stale dev servers, browser tabs, finished worktrees.", free>>20))
 }
 
 // stopStrays stops sessions named with Prefix that are no agent's current
@@ -193,8 +234,14 @@ func (sv *Supervisor) check(ctx context.Context, a Agent, byName map[string]Sess
 			// The plugin stopped answering. Whether or not the session still
 			// runs, fence it out and stop it; the agent starts again when it
 			// has work.
-			sv.Logger.Printf("supervisor: lost %s (%s)", a.ID, a.Name)
-			sv.retire(ctx, a, byName, "lost contact")
+			why := "lost contact"
+			if g, ok := sv.Launcher.(GoneExplainer); ok {
+				if r := g.WhyGone(Session{ID: a.Session, Name: a.Name}); r != "" {
+					why += " (" + r + ")"
+				}
+			}
+			sv.Logger.Printf("supervisor: lost %s (%s): %s", a.ID, a.Name, why)
+			sv.retire(ctx, a, byName, why)
 			return
 		}
 		if sv.deaf(a) {

@@ -141,6 +141,13 @@ are journaled once, and agents are supervised on a server.
     finished or waits on a person: it is stopped too and its task paused,
     so it starts again on its next event.
   - *Main*: kept running, as `keepMain` does today.
+  - *Lost*: a session whose plugin stops answering is fenced out, stopped
+    and relaunched when it has work. The log line says why when Claude
+    Code's daemon log does (`bg retire <id>: ...`): it closes idle
+    background sessions after 8 hours, and any idle one when the host has
+    under about 1 GB free.
+  - *Memory*: when the host has under 1.5 GB available, the person is told,
+    at most every 6 hours, before Claude Code starts closing sessions.
 - **Identity**: the launcher gives each session its agent id and the path of
   a secret file (0600) through `--settings` env, which reaches the plugin
   process. The plugin attaches with id, generation and secret. With agents

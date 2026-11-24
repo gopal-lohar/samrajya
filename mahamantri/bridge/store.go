@@ -954,8 +954,8 @@ func (s *Store) Recovery() (Recovery, error) {
 }
 
 // Said is what has been posted, or tried, in a task's conversations for
-// it, oldest first and at most the last limit: replies recorded against the
-// task, and replies in its thread (the main's acknowledgement may come
+// it, oldest first and at most the last limit: replies (and reactions)
+// recorded against the task, and replies in its thread (the main's acknowledgement may come
 // before the task exists). A session starting on the task reads it, so it
 // does not say again what was already said.
 func (s *Store) Said(t Task, limit int) ([]Action, error) {
@@ -972,7 +972,8 @@ func (s *Store) Said(t Task, limit int) ([]Action, error) {
 			if err := json.Unmarshal(v, &a); err != nil {
 				return err
 			}
-			if strings.HasSuffix(a.Kind, "_reply") && a.Status != Failed && (a.TaskID == t.ID || threads[a.Target]) {
+			said := strings.HasSuffix(a.Kind, "_reply") || strings.HasSuffix(a.Kind, "_reaction")
+			if said && a.Status != Failed && (a.TaskID == t.ID || threads[a.Target]) {
 				out = append(out, a)
 			}
 			return nil

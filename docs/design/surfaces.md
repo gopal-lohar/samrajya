@@ -201,7 +201,7 @@ own conversations (`telegram:<chat>:<topic>`).
 
 | tool | who | change |
 |---|---|---|
-| `samrajya_reply` | all | `conversation`, `thread_id`, `body`. A worker may reply only in its task's conversations and `reportTo`. |
+| `samrajya_reply` | all | `conversation`, `thread_id`, `body`, or `react` (an emoji on the message `thread_id` names, on a surface that implements `Reactor`; journaled as `<surface>_reaction`). A worker may reply only in its task's conversations and `reportTo`. |
 | `samrajya_dispatch` | main | `title`, `brief`, `conversation`, `thread_id`, `route` (the conversation's new messages go to the worker; default: the surface's `startsWork`), `links`, `event_ids` (the messages that asked for it), `project`. |
 | `samrajya_accept` | all | event ids alone accept a message answered on the spot, with no task. |
 | `samrajya_fetch` | all | save a file a message carried. |

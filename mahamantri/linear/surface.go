@@ -98,6 +98,15 @@ func (s *Surface) Received(ctx context.Context, e bridge.Event) error {
 	return s.API.React(ctx, e.MessageRef(), s.ReceivedEmoji)
 }
 
+// React adds emoji to a comment (message is its id) as Senapati.
+func (s *Surface) React(ctx context.Context, _, message, emoji string) error {
+	api, err := s.api()
+	if err != nil {
+		return err
+	}
+	return api.React(ctx, message, emoji)
+}
+
 // Notify replies in the ping's thread, mentioning its author.
 func (s *Surface) Notify(ctx context.Context, e bridge.Event, text string) error {
 	api, err := s.api()
